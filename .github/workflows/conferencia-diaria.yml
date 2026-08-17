@@ -1,0 +1,33 @@
+name: Conciliação Diária — PagSeguro x Fechamento de Caixa
+
+on:
+  schedule:
+    # 8h da manhã em Brasília (UTC-3) = 11h em UTC
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}  # permite rodar manualmente pelo botão "Run workflow" no GitHub
+
+jobs:
+  conciliacao:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Rodar job de conciliação
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          PAGSEGURO_USER_OUROPRETO: ${{ secrets.PAGSEGURO_USER_OUROPRETO }}
+          PAGSEGURO_TOKEN_OUROPRETO: ${{ secrets.PAGSEGURO_TOKEN_OUROPRETO }}
+          EMAIL_REMETENTE_MAILBOX: gabriel@hakunabatata.com.br
+          EMAIL_DESTINATARIO: gestaojapanobre@gmail.com
+        run: python job_conferencia_8h.py
