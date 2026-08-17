@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Japa Nobre — Ouro Preto</title>
+<style>
+  :root {
+    --red: #C0392B; --red-dark: #922B21;
+    --gold: #C9A227; --gold-light: #E8C547;
+    --dark: #141414; --card: #1E1E1E; --input-bg: #272727;
+    --border: #333; --text: #F0EDE8; --muted: #888;
+    --success: #27AE60; --warning: #E67E22; --danger: #E74C3C;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--dark); color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,sans-serif; min-height:100vh; padding-bottom:40px; }
+
+  header { background:linear-gradient(160deg,#1a0000 0%,#6B0A0A 60%,#1a0000 100%); border-bottom:2px solid var(--gold); padding:16px 20px 12px; text-align:center; position:sticky; top:0; z-index:100; }
+  .brand { font-size:19px; font-weight:800; color:var(--gold); letter-spacing:3px; text-transform:uppercase; }
+  .brand-loja { font-size:12px; color:var(--gold-light); margin-top:2px; letter-spacing:1px; font-weight:600; }
+  .brand-sub { font-size:10px; color:var(--muted); margin-top:2px; letter-spacing:1px; text-transform:uppercase; }
+
+  .progress-wrap { background:#1a1a1a; border-bottom:1px solid var(--border); padding:12px 20px; overflow-x:auto; }
+  .progress-steps { display:flex; gap:0; min-width:300px; max-width:520px; margin:0 auto; }
+  .step-item { flex:1; display:flex; flex-direction:column; align-items:center; position:relative; cursor:pointer; }
+  .step-item:not(:last-child)::after { content:''; position:absolute; top:14px; left:50%; width:100%; height:2px; background:var(--border); z-index:0; transition:background .3s; }
+  .step-item.done:not(:last-child)::after { background:var(--gold); }
+  .step-dot { width:28px; height:28px; border-radius:50%; border:2px solid var(--border); background:var(--card); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:var(--muted); z-index:1; transition:all .3s; }
+  .step-item.active .step-dot { border-color:var(--gold); background:var(--gold); color:#000; }
+  .step-item.done .step-dot { border-color:var(--gold); background:var(--red); color:var(--gold); font-size:13px; }
+  .step-label { font-size:9px; color:var(--muted); margin-top:5px; text-align:center; letter-spacing:.5px; text-transform:uppercase; line-height:1.2; }
+  .step-item.active .step-label { color:var(--gold); }
+  .step-item.done .step-label { color:var(--gold-light); }
+
+  .container { max-width:540px; margin:0 auto; padding:18px 14px; }
+  .page { display:none; }
+  .page.active { display:block; }
+
+  .page-title { font-size:18px; font-weight:700; color:var(--gold); margin-bottom:4px; }
+  .page-desc { font-size:13px; color:var(--muted); margin-bottom:18px; line-height:1.5; }
+
+  .date-banner { background:linear-gradient(135deg,rgba(139,0,0,.4) 0%,rgba(92,0,0,.6) 100%); border:1px solid rgba(201,162,39,.3); border-radius:10px; padding:14px 16px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; }
+  .db-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+  .db-date { font-size:17px; font-weight:800; color:var(--gold); margin-top:2px; }
+  .db-icon { font-size:26px; }
+
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:14px; }
+  .card-title { font-size:11px; font-weight:700; color:var(--gold); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--border); }
+
+  .form-group { margin-bottom:13px; }
+  .form-group:last-child { margin-bottom:0; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; letter-spacing:.3px; }
+  input[type=text], input[type=date], input[type=number], input[type=email], input[type=tel], select, textarea {
+    width:100%; background:var(--input-bg); border:1px solid var(--border); border-radius:8px;
+    padding:11px 13px; color:var(--text); font-size:15px; outline:none;
+    transition:border-color .2s,box-shadow .2s; -webkit-appearance:none; appearance:none;
+  }
+  input:focus, select:focus, textarea:focus { border-color:var(--gold); box-shadow:0 0 0 3px rgba(201,162,39,.1); }
+  select { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 12px center; padding-right:36px; }
+  textarea { resize:vertical; min-height:80px; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .req { color:var(--danger); margin-left:2px; }
+
+  /* Linha de pagamento */
+  .pay-row { display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--border); gap:10px; }
+  .pay-row:last-of-type { border-bottom:none; }
+  .pay-label { font-size:14px; flex:1; }
+  .pay-input { width:130px !important; text-align:right; padding:8px 10px !important; font-size:14px !important; }
+  .pay-row.disabled { opacity:.38; pointer-events:none; }
+  .pay-row.disabled .pay-label { font-style:italic; }
+  .ifood-badge { font-size:10px; background:rgba(234,76,21,.15); color:#ea4c15; border:1px solid rgba(234,76,21,.3); border-radius:6px; padding:1px 6px; margin-left:6px; }
+
+  /* Totais */
+  .total-box { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-radius:8px; margin-top:14px; }
+  .total-box.gold { background:rgba(201,162,39,.1); border:1px solid rgba(201,162,39,.3); }
+  .total-label { font-size:13px; font-weight:600; color:var(--gold); }
+  .total-value { font-size:20px; font-weight:800; color:var(--gold); }
+
+  /* Semáforo de diferença */
+  .diff-box { display:flex; justify-content:space-between; align-items:center; padding:14px; border-radius:10px; margin-top:14px; border:1px solid var(--border); background:rgba(255,255,255,.03); transition:all .3s; }
+  .diff-box.ok   { background:rgba(39,174,96,.12); border-color:#27AE60; }
+  .diff-box.warn { background:rgba(230,126,34,.12); border-color:#E67E22; }
+  .diff-box.bad  { background:rgba(231,76,60,.12);  border-color:#E74C3C; }
+  .diff-info .diff-tag { font-size:11px; color:var(--muted); }
+  .diff-info .diff-msg { font-size:13px; margin-top:3px; }
+  .diff-num { font-size:22px; font-weight:800; }
+
+  /* Foto */
+  .photo-zone { border:2px dashed var(--border); border-radius:10px; padding:20px 14px; text-align:center; cursor:pointer; transition:border-color .2s,background .2s; position:relative; overflow:hidden; display:block; }
+  .photo-zone:hover, .photo-zone.has-file { border-color:var(--gold); background:rgba(201,162,39,.04); }
+  .photo-zone input[type=file] { position:absolute; inset:0; opacity:0; cursor:pointer; font-size:0; }
+  .pz-icon { font-size:26px; margin-bottom:6px; }
+  .pz-label { font-size:13px; color:var(--muted); }
+  .pz-hint { font-size:11px; color:#555; margin-top:3px; }
+  .photo-preview-img { width:100%; border-radius:8px; margin-top:10px; display:none; max-height:260px; object-fit:cover; }
+  .foto-req { font-size:11px; color:var(--danger); margin-top:6px; display:none; }
+
+  /* Ocorrências */
+  .ocorrencia-item { background:var(--input-bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .2s; display:flex; align-items:center; gap:12px; }
+  .ocorrencia-item:hover { border-color:var(--gold); }
+  .ocorrencia-item.selected { border-color:var(--gold); background:rgba(201,162,39,.08); }
+  .oc-check { width:20px; height:20px; border-radius:50%; border:2px solid var(--border); flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:11px; }
+  .ocorrencia-item.selected .oc-check { background:var(--gold); border-color:var(--gold); color:#000; }
+  .oc-text { font-size:14px; }
+
+  /* Botões */
+  .nav-row { display:flex; gap:12px; margin-top:22px; }
+  .btn { flex:1; padding:14px; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; border:none; transition:opacity .2s,transform .1s; letter-spacing:.5px; }
+  .btn:active { transform:scale(.98); }
+  .btn-prev { background:var(--input-bg); border:1px solid var(--border); color:var(--muted); flex:0 0 auto; width:52px; font-size:18px; }
+  .btn-next { background:linear-gradient(135deg,var(--red) 0%,var(--red-dark) 100%); border:1px solid rgba(201,162,39,.4); color:var(--gold); }
+  .btn-submit { background:linear-gradient(135deg,var(--red) 0%,var(--red-dark) 100%); border:2px solid var(--gold); color:var(--gold); font-size:16px; letter-spacing:1px; text-transform:uppercase; }
+  .btn:disabled { opacity:.35; cursor:not-allowed; }
+
+  /* Toast */
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(120px); background:#1E1E1E; border:1px solid var(--gold); color:var(--text); padding:14px 22px; border-radius:10px; font-size:14px; z-index:999; max-width:320px; text-align:center; transition:transform .3s; pointer-events:none; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+
+  /* Tela de confirmação */
+  .success-screen { display:none; padding:30px 16px; }
+  .sc-header { text-align:center; margin-bottom:24px; }
+  .sc-icon { font-size:56px; margin-bottom:12px; }
+  .sc-title { font-size:22px; font-weight:800; color:var(--gold); margin-bottom:6px; }
+  .sc-sub { font-size:13px; color:var(--muted); }
+  .sc-protocol { display:inline-block; background:rgba(201,162,39,.1); border:1px solid rgba(201,162,39,.3); border-radius:8px; padding:8px 16px; font-size:13px; color:var(--gold); margin-top:10px; letter-spacing:1px; font-weight:700; }
+  .sc-resumo { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:14px; }
+  .sc-resumo-title { font-size:11px; font-weight:700; color:var(--gold); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:14px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  .sc-row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid rgba(255,255,255,.05); font-size:14px; }
+  .sc-row:last-child { border-bottom:none; }
+  .sc-row-label { color:var(--muted); }
+  .sc-row-val { font-weight:600; color:var(--text); }
+  .sc-semaforo { display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:10px; margin-top:4px; font-size:14px; font-weight:600; }
+  .sema-ok   { background:rgba(39,174,96,.15); border:1px solid #27AE60; color:#2ECC71; }
+  .sema-warn { background:rgba(230,126,34,.15); border:1px solid #E67E22; color:#E67E22; }
+  .sema-bad  { background:rgba(231,76,60,.15);  border:1px solid #E74C3C; color:#E74C3C; }
+  .sc-breakdown { margin-top:10px; }
+  .sc-bd-row { display:flex; justify-content:space-between; padding:5px 0; font-size:13px; border-bottom:1px solid rgba(255,255,255,.04); }
+  .sc-bd-row:last-child { border-bottom:none; }
+  .sc-bd-label { color:var(--muted); }
+  .sc-bd-val { font-weight:500; }
+  .sc-bd-diff { font-size:12px; margin-left:8px; }
+  .diff-ok   { color:#27AE60; }
+  .diff-warn { color:#E67E22; }
+  .diff-bad  { color:#E74C3C; }
+
+  @media(max-width:400px){ .grid-2{grid-template-columns:1fr;} .pay-input{width:110px !important;} }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">🍱 Japa Nobre</div>
+  <div class="brand-loja">Unidade Ouro Preto</div>
+  <div class="brand-sub">Relatório Diário de Fechamento</div>
+</header>
+
+<div class="progress-wrap">
+  <div class="progress-steps">
+    <div class="step-item active" id="step-1">
+      <div class="step-dot">1</div><div class="step-label">Fechamento de Caixa</div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- ═══════════════════════════
+       PÁG 1 — FECHAMENTO DE CAIXA
+  ═══════════════════════════ -->
+  <div class="page active" id="page-1">
+    <div class="page-title">Fechamento de Caixa</div>
+    <div class="page-desc">Informe os valores físicos de cada meio de pagamento e anexe as fotos obrigatórias.</div>
+
+    <div class="date-banner">
+      <div>
+        <div class="db-label">Data do fechamento</div>
+        <div class="db-date" id="banner_data">—</div>
+      </div>
+      <div class="db-icon">📅</div>
+    </div>
+    <input type="hidden" id="data">
+
+    <div class="card">
+      <div class="card-title">👤 Responsável</div>
+      <div class="form-group">
+        <label>Nome do responsável pelo fechamento <span class="req">*</span></label>
+        <input type="text" id="responsavel" placeholder="Seu nome completo" autocomplete="name">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">💰 Meios de Pagamento — Contagem Física</div>
+
+      <div class="pay-row">
+        <div class="pay-label">💵 Dinheiro</div>
+        <input class="pay-input" type="number" id="p_dinheiro" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">🤝 Cortesia</div>
+        <input class="pay-input" type="number" id="p_cortesia" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">💳 Débito</div>
+        <input class="pay-input" type="number" id="p_debito" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">💳 Crédito</div>
+        <input class="pay-input" type="number" id="p_credito" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">📱 PIX</div>
+        <input class="pay-input" type="number" id="p_pix" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row disabled">
+        <div class="pay-label">🛵 Pgt. Online (iFood) <span class="ifood-badge">Escritório</span></div>
+        <input class="pay-input" type="number" id="p_online" value="0" readonly tabindex="-1">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">🍽️ Saipos</div>
+        <input class="pay-input" type="number" id="p_saipos_pgto" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">🎫 Vale Refeição</div>
+        <input class="pay-input" type="number" id="p_vale" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+      <div class="pay-row">
+        <div class="pay-label">🎟️ Voucher</div>
+        <input class="pay-input" type="number" id="p_voucher" placeholder="0,00" min="0" step="0.01" oninput="calcular()">
+      </div>
+
+      <div class="total-box gold">
+        <div class="total-label">Total Contado</div>
+        <div class="total-value" id="total_contado">R$ 0,00</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📊 Conferência Saipos</div>
+      <div class="form-group">
+        <label>Total apontado pelo Saipos (papel do fechamento)</label>
+        <input type="number" id="total_saipos" placeholder="0,00" min="0" step="0.01" oninput="calcDiff()">
+      </div>
+      <div class="diff-box" id="diff_box">
+        <div class="diff-info">
+          <div class="diff-tag">Diferença (Físico − Saipos)</div>
+          <div class="diff-msg" id="diff_msg">Preencha o total do Saipos</div>
+        </div>
+        <div class="diff-num" id="diff_num">—</div>
+      </div>
+      <div class="form-group" style="margin-top:14px;">
+        <label>Observação sobre o fechamento (opcional)</label>
+        <input type="text" id="obs_caixa" placeholder="Ex: erro no troco do delivery, teste de pagamento...">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📸 Foto — Papel do Fechamento Saipos <span class="req">*</span></div>
+      <label class="photo-zone" id="zone_saipos">
+        <input type="file" accept="image/*" capture="environment" onchange="prevFoto(this,'prev_saipos','zone_saipos','req_saipos')">
+        <div class="pz-icon">🧾</div>
+        <div class="pz-label">Fotografar o papel do fechamento do Saipos</div>
+        <div class="pz-hint">Obrigatório — foto do cupom impresso ou tela do sistema</div>
+      </label>
+      <img class="photo-preview-img" id="prev_saipos" alt="Saipos">
+      <div class="foto-req" id="req_saipos">⚠️ Foto obrigatória</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📸 Foto — Máquinas de Cartão <span class="req">*</span></div>
+      <label class="photo-zone" id="zone_maquina">
+        <input type="file" accept="image/*" capture="environment" onchange="prevFoto(this,'prev_maquina','zone_maquina','req_maquina')">
+        <div class="pz-icon">💳</div>
+        <div class="pz-label">Fotografar a tela ou comprovante das máquinas</div>
+        <div class="pz-hint">Stone, Cielo, PagSeguro — todos os terminais do dia</div>
+      </label>
+      <img class="photo-preview-img" id="prev_maquina" alt="Máquinas">
+      <div class="foto-req" id="req_maquina">⚠️ Foto obrigatória</div>
+    </div>
+
+    <div class="nav-row">
+      <button class="btn btn-submit" onclick="enviar()">Enviar Fechamento ✓</button>
+    </div>
+  </div>
+
+
+  <!-- ═══════════════════════════
+       TELA DE CONFIRMAÇÃO
+  ═══════════════════════════ -->
+  <div class="success-screen" id="success">
+    <div class="sc-header">
+      <div class="sc-icon">✅</div>
+      <div class="sc-title">Fechamento enviado!</div>
+      <div class="sc-sub">Recebido com sucesso. Boa noite! 🍱</div>
+      <div class="sc-protocol" id="sc_protocol">—</div>
+    </div>
+
+    <div class="sc-resumo">
+      <div class="sc-resumo-title">📊 Resumo do Fechamento</div>
+      <div class="sc-row"><span class="sc-row-label">Unidade</span><span class="sc-row-val">Japa Nobre — Ouro Preto</span></div>
+      <div class="sc-row"><span class="sc-row-label">Data</span><span class="sc-row-val" id="sc_data">—</span></div>
+      <div class="sc-row"><span class="sc-row-label">Responsável</span><span class="sc-row-val" id="sc_resp">—</span></div>
+      <div class="sc-row"><span class="sc-row-label">Total físico</span><span class="sc-row-val" id="sc_total">—</span></div>
+      <div class="sc-row"><span class="sc-row-label">Total Saipos</span><span class="sc-row-val" id="sc_saipos">—</span></div>
+      <div id="sc_semaforo" class="sc-semaforo sema-ok" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="sc-resumo">
+      <div class="sc-resumo-title">💰 Detalhamento por Pagamento</div>
+      <div class="sc-breakdown" id="sc_breakdown"></div>
+    </div>
+
+    <button class="btn btn-next" style="margin-top:8px;" onclick="novoRelatorio()">Novo fechamento</button>
+  </div>
+
+</div><!-- /container -->
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── CONFIGURAÇÃO DA LOJA ──────────────────────
+const LOJA = 'Japa Nobre — Ouro Preto';
+const LOJA_ID = 'ouro-preto';
+// Substitua pela URL do Power Automate quando disponível
+const WEBHOOK = 'https://portal-japa-nobre-func.azurewebsites.net/api/receber-fechamento';
+
+// Meios de pagamento desta loja (sem Bigou, sem Raspadinha)
+const MEIOS = [
+  { id:'p_dinheiro', label:'Dinheiro' },
+  { id:'p_cortesia', label:'Cortesia' },
+  { id:'p_debito',   label:'Débito' },
+  { id:'p_credito',  label:'Crédito' },
+  { id:'p_pix',      label:'PIX' },
+  { id:'p_saipos_pgto',   label:'Saipos' },
+  { id:'p_vale',     label:'Vale Refeição' },
+  { id:'p_voucher',  label:'Voucher' },
+];
+
+// ── INIT ──────────────────────────────────────
+const HOJE = new Date();
+const DATA_ISO = HOJE.toISOString().split('T')[0];
+document.getElementById('data').value = DATA_ISO;
+
+const DIAS = ['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];
+const MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+document.getElementById('banner_data').textContent =
+  DIAS[HOJE.getDay()] + ', ' + HOJE.getDate() + ' de ' + MESES[HOJE.getMonth()] + ' de ' + HOJE.getFullYear();
+
+// ── HELPERS ───────────────────────────────────
+function getN(id) { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? 0 : v; }
+function brl(v) { return v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
+function abs(v) { return Math.abs(v); }
+
+// ── CÁLCULO TOTAL ─────────────────────────────
+function calcular() {
+  const total = MEIOS.reduce((s,m) => s + getN(m.id), 0);
+  document.getElementById('total_contado').textContent = brl(total);
+  calcDiff();
+}
+
+// ── SEMÁFORO DE DIFERENÇA ─────────────────────
+function calcDiff() {
+  const total = MEIOS.reduce((s,m) => s + getN(m.id), 0);
+  const saipos = getN('total_saipos');
+  const diff = total - saipos;
+  const box = document.getElementById('diff_box');
+  const num = document.getElementById('diff_num');
+  const msg = document.getElementById('diff_msg');
+
+  if (!saipos && saipos !== 0) { num.textContent = '—'; msg.textContent = 'Preencha o total do Saipos'; box.className = 'diff-box'; return; }
+
+  num.textContent = brl(diff);
+  const a = abs(diff);
+
+  if (a <= 1.00) {
+    box.className = 'diff-box ok';
+    num.style.color = '#27AE60';
+    msg.textContent = '🟢 Fechou certinho';
+  } else if (a <= 5.00) {
+    box.className = 'diff-box warn';
+    num.style.color = '#E67E22';
+    msg.textContent = '🟡 Pequena diferença — verifique';
+  } else {
+    box.className = 'diff-box bad';
+    num.style.color = '#E74C3C';
+    msg.textContent = '🔴 Atenção — diferença acima de R$ 5,00';
+  }
+}
+
+// ── FOTO PREVIEW (com compressão para caber no anexo do e-mail) ──
+function prevFoto(input, previewId, zoneId, reqId) {
+  if (!input.files?.[0]) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const imgTemp = new Image();
+    imgTemp.onload = () => {
+      const MAX_LARGURA = 1000;
+      const escala = Math.min(1, MAX_LARGURA / imgTemp.width);
+      const canvas = document.createElement('canvas');
+      canvas.width = imgTemp.width * escala;
+      canvas.height = imgTemp.height * escala;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(imgTemp, 0, 0, canvas.width, canvas.height);
+      const comprimido = canvas.toDataURL('image/jpeg', 0.7);
+
+      const img = document.getElementById(previewId);
+      img.src = comprimido;
+      img.dataset.base64 = comprimido;
+      img.style.display = 'block';
+      document.getElementById(zoneId).classList.add('has-file');
+      document.getElementById(zoneId).querySelector('.pz-label').textContent = '✅ Foto adicionada — toque para trocar';
+      if (reqId) document.getElementById(reqId).style.display = 'none';
+    };
+    imgTemp.src = e.target.result;
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+// ── VALIDAÇÃO ANTES DO ENVIO (versão simplificada — só Caixa) ──
+function validarCaixa() {
+  const resp = document.getElementById('responsavel').value.trim();
+  if (!resp) { toast('⚠️ Informe o nome do responsável.'); return false; }
+  const semSaipos = !document.getElementById('prev_saipos').src || document.getElementById('prev_saipos').style.display === 'none';
+  const semMaquina = !document.getElementById('prev_maquina').src || document.getElementById('prev_maquina').style.display === 'none';
+  if (semSaipos) { document.getElementById('req_saipos').style.display = 'block'; toast('📸 Foto do papel do Saipos é obrigatória.'); return false; }
+  if (semMaquina) { document.getElementById('req_maquina').style.display = 'block'; toast('📸 Foto das máquinas de cartão é obrigatória.'); return false; }
+  return true;
+}
+
+// ── TOAST ─────────────────────────────────────
+function toast(msg, dur=3500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), dur);
+}
+
+// ── GERAR PROTOCOLO ───────────────────────────
+function gerarProtocolo() {
+  const d = new Date();
+  return 'OP-' + d.getFullYear() +
+    String(d.getMonth()+1).padStart(2,'0') +
+    String(d.getDate()).padStart(2,'0') + '-' +
+    String(d.getHours()).padStart(2,'0') +
+    String(d.getMinutes()).padStart(2,'0');
+}
+
+// ── MONTAR TELA DE CONFIRMAÇÃO ────────────────
+function montarConfirmacao(payload) {
+  const protocolo = gerarProtocolo();
+  document.getElementById('sc_protocol').textContent = '📋 Protocolo: ' + protocolo;
+  document.getElementById('sc_data').textContent = DIAS[HOJE.getDay()] + ', ' + HOJE.getDate() + '/' + (HOJE.getMonth()+1) + '/' + HOJE.getFullYear();
+  document.getElementById('sc_resp').textContent = payload.responsavel;
+  document.getElementById('sc_total').textContent = brl(payload.total_contado);
+  document.getElementById('sc_saipos').textContent = brl(payload.total_saipos);
+
+  const diff = payload.diferenca;
+  const a = abs(diff);
+  const sem = document.getElementById('sc_semaforo');
+  if (a <= 1.00) {
+    sem.className = 'sc-semaforo sema-ok';
+    sem.innerHTML = '🟢 Fechou certinho — diferença de ' + brl(diff);
+  } else if (a <= 5.00) {
+    sem.className = 'sc-semaforo sema-warn';
+    sem.innerHTML = '🟡 Pequena diferença de ' + brl(diff) + ' — Jamilha será notificada';
+  } else {
+    sem.className = 'sc-semaforo sema-bad';
+    sem.innerHTML = '🔴 Diferença de ' + brl(diff) + ' — Jamilha será notificada para verificar';
+  }
+
+  // Detalhamento por meio de pagamento
+  const bd = document.getElementById('sc_breakdown');
+  bd.innerHTML = '';
+  MEIOS.forEach(m => {
+    const v = getN(m.id);
+    if (v <= 0) return;
+    const row = document.createElement('div');
+    row.className = 'sc-bd-row';
+    row.innerHTML = '<span class="sc-bd-label">' + m.label + '</span><span class="sc-bd-val">' + brl(v) + '</span>';
+    bd.appendChild(row);
+  });
+  if (payload.obs_caixa) {
+    const row = document.createElement('div');
+    row.className = 'sc-bd-row';
+    row.innerHTML = '<span class="sc-bd-label">Observação</span><span class="sc-bd-val" style="color:var(--muted);font-weight:400;">' + payload.obs_caixa + '</span>';
+    bd.appendChild(row);
+  }
+  payload.protocolo = protocolo;
+}
+
+// ── ENVIO ─────────────────────────────────────
+async function enviar() {
+  if (!validarCaixa()) return;
+
+  const total_contado = MEIOS.reduce((s,m) => s + getN(m.id), 0);
+  const total_saipos = getN('total_saipos');
+  const diferenca = total_contado - total_saipos;
+
+  const meios_obj = {};
+  MEIOS.forEach(m => { meios_obj[m.id.replace('p_','')] = getN(m.id); });
+
+  const payload = {
+    // Metadados
+    loja: LOJA,
+    loja_id: LOJA_ID,
+    data: DATA_ISO,
+    timestamp: new Date().toISOString(),
+    responsavel: document.getElementById('responsavel').value.trim(),
+    // Caixa
+    meios_pagamento: meios_obj,
+    total_contado,
+    total_saipos,
+    diferenca,
+    obs_caixa: document.getElementById('obs_caixa').value,
+    // Semáforo
+    semaforo: abs(diferenca) <= 1 ? 'verde' : abs(diferenca) <= 5 ? 'amarelo' : 'vermelho',
+    // Fotos (já comprimidas, prontas para anexar ao e-mail)
+    foto_saipos_base64: document.getElementById('prev_saipos').dataset.base64 || null,
+    foto_maquina_base64: document.getElementById('prev_maquina').dataset.base64 || null,
+  };
+
+  const btn = document.querySelector('.btn-submit');
+  btn.disabled = true;
+  btn.textContent = 'Enviando...';
+
+  try {
+    if (WEBHOOK === 'INSERIR_URL_POWER_AUTOMATE_AQUI') {
+      await new Promise(r => setTimeout(r, 1200)); // simulação
+    } else {
+      await fetch(WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    }
+    montarConfirmacao(payload);
+    document.getElementById('page-1').classList.remove('active');
+    document.getElementById('success').style.display = 'block';
+    window.scrollTo({ top:0, behavior:'smooth' });
+  } catch(e) {
+    toast('❌ Erro ao enviar. Verifique a conexão e tente novamente.');
+    btn.disabled = false;
+    btn.textContent = 'Enviar Fechamento ✓';
+  }
+}
+
+// ── NOVO RELATÓRIO ────────────────────────────
+function novoRelatorio() {
+  document.getElementById('success').style.display = 'none';
+  document.getElementById('page-1').classList.add('active');
+  window.scrollTo({ top:0 });
+}
+</script>
+</body>
+</html>
