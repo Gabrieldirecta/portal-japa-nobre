@@ -186,6 +186,10 @@
         <label>Nome do responsável pelo fechamento <span class="req">*</span></label>
         <input type="text" id="responsavel" placeholder="Seu nome completo" autocomplete="name">
       </div>
+      <div class="form-group">
+        <label>Hora do fechamento <span class="req">*</span></label>
+        <input type="time" id="hora_fechamento">
+      </div>
     </div>
 
     <div class="card">
@@ -419,6 +423,8 @@ function prevFoto(input, previewId, zoneId, reqId) {
 function validarCaixa() {
   const resp = document.getElementById('responsavel').value.trim();
   if (!resp) { toast('⚠️ Informe o nome do responsável.'); return false; }
+  const hora = document.getElementById('hora_fechamento').value;
+  if (!hora) { toast('⚠️ Informe a hora do fechamento.'); return false; }
   const semSaipos = !document.getElementById('prev_saipos').src || document.getElementById('prev_saipos').style.display === 'none';
   const semMaquina = !document.getElementById('prev_maquina').src || document.getElementById('prev_maquina').style.display === 'none';
   if (semSaipos) { document.getElementById('req_saipos').style.display = 'block'; toast('📸 Foto do papel do Saipos é obrigatória.'); return false; }
@@ -505,6 +511,7 @@ async function enviar() {
     data: DATA_ISO,
     timestamp: new Date().toISOString(),
     responsavel: document.getElementById('responsavel').value.trim(),
+    hora_fechamento: document.getElementById('hora_fechamento').value,
     // Caixa
     meios_pagamento: meios_obj,
     total_contado,
