@@ -1,0 +1,52 @@
+name: Conciliação Diária — PagSeguro x Fechamento de Caixa
+
+on:
+  schedule:
+    # 8h da manhã em Brasília (UTC-3) = 11h em UTC
+    - cron: "0 11 * * *"
+  workflow_dispatch:  # permite rodar manualmente pelo botão "Run workflow" no GitHub
+    inputs:
+      data_alvo:
+        description: "Data para conciliar (AAAA-MM-DD). Deixe em branco para usar 'ontem' automaticamente."
+        required: false
+        default: ""
+
+jobs:
+  conciliacao:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Decodificar certificados do Banco Inter
+        run: |
+          echo "${{ secrets.INTER_CERT_OUROPRETO }}" | base64 -d > inter_cert.pem
+          echo "${{ secrets.INTER_KEY_OUROPRETO }}" | base64 -d > inter_key.pem
+
+      - name: Rodar job de conciliação
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          PAGSEGURO_USER_OUROPRETO: ${{ secrets.PAGSEGURO_USER_OUROPRETO }}
+          PAGSEGURO_TOKEN_OUROPRETO: ${{ secrets.PAGSEGURO_TOKEN_OUROPRETO }}
+          INTER_CLIENT_ID_OUROPRETO: ${{ secrets.INTER_CLIENT_ID_OUROPRETO }}
+          INTER_CLIENT_SECRET_OUROPRETO: ${{ secrets.INTER_CLIENT_SECRET_OUROPRETO }}
+          INTER_CERT_PATH: inter_cert.pem
+          INTER_KEY_PATH: inter_key.pem
+          SAIPOS_TOKEN: ${{ secrets.SAIPOS_TOKEN }}
+          EMAIL_REMETENTE_MAILBOX: gabriel@hakunabatata.com.br
+          EMAIL_DESTINATARIO: gestaojapanobre@gmail.com
+        run: python job_conferencia_8h.py
+
+      - name: Remover certificados temporários
+        if: always()
+        run: rm -f inter_cert.pem inter_key.pem

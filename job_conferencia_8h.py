@@ -641,13 +641,21 @@ def calcular_farol_geral(farois):
     return "cinza"
 
 
-def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None):
+def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None, modo_teste=False):
     ano_f, mes_f, dia_f = data_str.split("-")
     data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
 
     farol_geral = calcular_farol_geral(farois_gerais)
     emoji_geral = FAROL_EMOJI.get(farol_geral, "⚪")
     texto_geral = FAROL_TEXTO.get(farol_geral, "SEM DADOS")
+
+    faixa_teste = ""
+    if modo_teste:
+        faixa_teste = """
+        <div style="background:#333;color:#fff;text-align:center;padding:8px;font-size:12px;font-weight:700;letter-spacing:1px;">
+          ⚠️ E-MAIL DE TESTE — NÃO É O FECHAMENTO OFICIAL DO DIA
+        </div>
+        """
 
     secao_excecao = ""
     if excecao_pix:
@@ -668,6 +676,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f2f2;padding:24px 0;">
     <tr><td align="center">
     <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08);">
+      {faixa_teste}
       <tr>
         <td style="background:#6B0A0A;padding:16px 24px;">
           <table role="presentation" width="100%"><tr>
@@ -704,7 +713,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "message": {
-            "subject": f"{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
+            "subject": f"{'[TESTE] ' if modo_teste else ''}{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
         }
@@ -717,7 +726,12 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
 # EXECUCAO PRINCIPAL
 # ─────────────────────────────────────────────
 def main():
-    ontem = date.today() - timedelta(days=1)
+    data_override = os.environ.get("DATA_ALVO", "").strip()
+    if data_override:
+        ontem = datetime.strptime(data_override, "%Y-%m-%d").date()
+        print(f"Usando data manual (DATA_ALVO): {ontem}")
+    else:
+        ontem = date.today() - timedelta(days=1)
     data_str = ontem.strftime("%Y-%m-%d")
     print(f"Conciliando o dia: {data_str}")
 
@@ -855,7 +869,7 @@ def main():
         farois_gerais.append(farol)
 
     excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro)
-    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao)
+    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=bool(data_override))
     print("E-mail unico enviado com sucesso.")
 
 

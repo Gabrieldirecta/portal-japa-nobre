@@ -340,8 +340,27 @@ const MEIOS = [
 ];
 
 // ── INIT ──────────────────────────────────────
-const HOJE = new Date();
-const DATA_ISO = HOJE.toISOString().split('T')[0];
+// Corte de virada do dia: fechamentos feitos antes das 04:00 da madrugada
+// ainda contam como o dia anterior (ex: fechar às 00:30 é o "ontem à noite").
+const HORA_CORTE_VIRADA = 4;
+
+const AGORA = new Date();
+const DATA_COMERCIAL = new Date(AGORA);
+if (AGORA.getHours() < HORA_CORTE_VIRADA) {
+  DATA_COMERCIAL.setDate(DATA_COMERCIAL.getDate() - 1);
+}
+const HOJE = DATA_COMERCIAL;
+
+function formatarDataLocal(d) {
+  // Usa os componentes de data LOCAIS (não UTC), para não pular de dia
+  // por causa do fuso horário (Brasil = UTC-3).
+  const ano = d.getFullYear();
+  const mes = String(d.getMonth() + 1).padStart(2, '0');
+  const dia = String(d.getDate()).padStart(2, '0');
+  return `${ano}-${mes}-${dia}`;
+}
+
+const DATA_ISO = formatarDataLocal(HOJE);
 document.getElementById('data').value = DATA_ISO;
 
 const DIAS = ['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];

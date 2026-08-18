@@ -61,7 +61,7 @@ COLUNA_MEIO = {
     "debito": "D",
     "credito": "E",
     # "online" não vem do formulário simplificado (é preenchido pelo escritório)
-    "saipos": "G",
+    "saipos_pgto": "G",
     "vale": "H",
     "voucher": "I",
     "pix": "J",
@@ -98,24 +98,55 @@ def obter_site_id(token):
     return resp.json()["id"]
 
 
-def localizar_arquivo_dashboard(token, site_id, mes_num, ano):
-    """Busca o arquivo do Dashboard do mês pelo nome, sem depender do caminho exato da pasta."""
-    mes_label = MESES_PT[mes_num]  # ex: "09 - Setembro"
-    nome_esperado = f"{mes_label} Dashboard Ouro Preto {ano}.xlsx"
+SITE_LOJA_FOLDER = "Japa Nobre - Ouro preto"  # pasta raiz da loja dentro de "Shared Documents"
 
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root/search(q='{mes_label.split(' - ')[1]} Dashboard Ouro Preto {ano}')"
+
+def _listar_filhos(token, site_id, caminho):
+    """Lista os itens (arquivos/pastas) dentro de um caminho, usando o drive item por path."""
     headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{caminho}:/children"
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
-    resultados = resp.json().get("value", [])
+    return resp.json().get("value", [])
 
-    for item in resultados:
-        if item["name"].lower() == nome_esperado.lower():
+
+def localizar_arquivo_dashboard(token, site_id, mes_num, ano):
+    """
+    Localiza o arquivo do Dashboard do mês navegando pela estrutura de pastas
+    (em vez de usar o endpoint /search, que retorna 403 com permissão de aplicativo).
+
+    Estrutura esperada: Japa Nobre - Ouro preto/Financeiro/{ano}/{pasta do mês}/{arquivo}.xlsx
+    A pasta do mês tem grafia inconsistente ("08- Agosto" vs "08 - Agosto"), então
+    localizamos por correspondência parcial do nome do mês, não pelo nome exato.
+    """
+    mes_nome = MESES_PT[mes_num].split(" - ")[1]  # ex: "Agosto"
+
+    caminho_ano = f"{SITE_LOJA_FOLDER}/Financeiro/{ano}"
+    pastas_do_ano = _listar_filhos(token, site_id, caminho_ano)
+
+    pasta_mes = None
+    for item in pastas_do_ano:
+        if "folder" in item and mes_nome.lower() in item["name"].lower():
+            pasta_mes = item["name"]
+            break
+
+    if not pasta_mes:
+        raise FileNotFoundError(
+            f"Não encontrei a pasta do mês '{mes_nome}' dentro de '{caminho_ano}'. "
+            f"Pastas disponíveis: {[i['name'] for i in pastas_do_ano]}"
+        )
+
+    caminho_mes = f"{caminho_ano}/{pasta_mes}"
+    arquivos_do_mes = _listar_filhos(token, site_id, caminho_mes)
+
+    for item in arquivos_do_mes:
+        nome = item["name"].lower()
+        if nome.endswith(".xlsx") and "dashboard" in nome and "ouro preto" in nome:
             return item["id"]
 
     raise FileNotFoundError(
-        f"Não encontrei o arquivo '{nome_esperado}' no SharePoint. "
-        f"Confirme se o Dashboard desse mês já foi criado/duplicado."
+        f"Não encontrei o arquivo Dashboard dentro de '{caminho_mes}'. "
+        f"Arquivos disponíveis: {[i['name'] for i in arquivos_do_mes]}"
     )
 
 
@@ -151,6 +182,26 @@ def encontrar_linha_da_data(token, site_id, item_id, data_fechamento):
     raise ValueError(f"Não encontrei a linha correspondente a {data_fechamento} na aba '{sheet}'.")
 
 
+def determinar_linha_e_turno(token, site_id, item_id, linha_data):
+    """Verifica se a linha da data já tem valores lançados.
+    Se estiver vazia, é o 1º fechamento do dia (DIA), escreve nela mesma.
+    Se já tiver algo, é o 2º fechamento do dia (NOITE), escreve na linha de baixo."""
+    sheet = "Fechamento de Caixa"
+    url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}"
+        f"/workbook/worksheets('{sheet}')/range(address='B{linha_data}:J{linha_data}')"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    valores = resp.json()["values"][0]
+    tem_valor = any(v not in (None, "", 0) for v in valores)
+
+    if not tem_valor:
+        return linha_data, "DIA"
+    return linha_data + 1, "NOITE"
+
+
 # ─────────────────────────────────────────────
 # ESCREVER OS VALORES NA LINHA ENCONTRADA
 # ─────────────────────────────────────────────
@@ -172,14 +223,23 @@ def preencher_linha(token, site_id, item_id, linha, payload):
             resp = requests.patch(url, headers=headers, json=body)
             resp.raise_for_status()
 
-    # Observação (texto)
-    if payload.get("obs_caixa"):
+    # Observação (texto) — inclui a hora do fechamento junto
+    hora = payload.get("hora_fechamento")
+    obs_original = payload.get("obs_caixa", "")
+    partes_obs = []
+    if hora:
+        partes_obs.append(f"Fechado às {hora}")
+    if obs_original:
+        partes_obs.append(obs_original)
+    texto_obs = " — ".join(partes_obs)
+
+    if texto_obs:
         endereco = f"{COLUNA_OBSERVACAO}{linha}"
         url = (
             f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}"
             f"/workbook/worksheets('{sheet}')/range(address='{endereco}')"
         )
-        resp = requests.patch(url, headers=headers, json={"values": [[payload["obs_caixa"]]]})
+        resp = requests.patch(url, headers=headers, json={"values": [[texto_obs]]})
         resp.raise_for_status()
 
     # Nota: Total (K) e Diferença (L) já são calculados por fórmula na
@@ -189,27 +249,67 @@ def preencher_linha(token, site_id, item_id, linha, payload):
 # ─────────────────────────────────────────────
 # ENVIAR E-MAIL PARA O JOÃO
 # ─────────────────────────────────────────────
+def _montar_anexo(nome_arquivo, data_uri):
+    """Converte uma data URI ('data:image/jpeg;base64,...') em um anexo
+    no formato que a Graph API espera para sendMail."""
+    if not data_uri or "," not in data_uri:
+        return None
+    cabecalho, base64_puro = data_uri.split(",", 1)
+    content_type = "image/jpeg"
+    if "image/png" in cabecalho:
+        content_type = "image/png"
+    return {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": nome_arquivo,
+        "contentType": content_type,
+        "contentBytes": base64_puro,
+    }
+
+
 def enviar_email_conferencia(token, payload):
     farol_emoji = {"verde": "🟢", "amarelo": "🟡", "vermelho": "🔴"}
     emoji = farol_emoji.get(payload["semaforo"], "⚪")
 
+    # Extrai só o nome da cidade (depois do travessão), ex: "Japa Nobre — Ouro Preto" -> "Ouro Preto"
+    cidade = payload["loja"].split("—")[-1].strip()
+    turno = payload.get("turno", "")
+    turno_label = f" {turno}" if turno else ""
+
+    ano_f, mes_f, dia_f = payload["data"].split("-")
+    data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
+
     corpo_html = f"""
-    <h2>{emoji} Fechamento de Caixa — {payload['loja']}</h2>
+    <h2>{emoji} Fechamento de Caixa — {payload['loja']}{turno_label}</h2>
     <p><b>Data:</b> {payload['data']}</p>
+    <p><b>Hora do fechamento:</b> {payload.get('hora_fechamento', '—')}</p>
     <p><b>Responsável:</b> {payload['responsavel']}</p>
     <p><b>Total contado:</b> R$ {payload['total_contado']:.2f}</p>
     <p><b>Total Saipos (conferência):</b> R$ {payload['total_saipos']:.2f}</p>
     <p><b>Diferença:</b> R$ {payload['diferenca']:.2f} — {emoji}</p>
     {"<p><b>Observação:</b> " + payload["obs_caixa"] + "</p>" if payload.get("obs_caixa") else ""}
+    <p><i>Fotos do fechamento em anexo (papel do Saipos e máquinas de cartão).</i></p>
     """
+
+    anexos = []
+    anexo_saipos = _montar_anexo(
+        f"saipos-{payload['data']}.jpg", payload.get("foto_saipos_base64")
+    )
+    anexo_maquina = _montar_anexo(
+        f"maquinas-{payload['data']}.jpg", payload.get("foto_maquina_base64")
+    )
+    if anexo_saipos:
+        anexos.append(anexo_saipos)
+    if anexo_maquina:
+        anexos.append(anexo_maquina)
 
     url = f"https://graph.microsoft.com/v1.0/users/{EMAIL_REMETENTE_MAILBOX}/sendMail"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "message": {
-            "subject": f"{emoji} Fechamento {payload['loja']} — {payload['data']}",
+            "subject": f"{emoji} Fechamento Caixa {cidade}{turno_label} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
+            "attachments": anexos,
         }
     }
     resp = requests.post(url, headers=headers, json=body)
@@ -228,13 +328,14 @@ def processar_fechamento(payload: dict):
     token = obter_token_graph()
     site_id = obter_site_id(token)
     item_id = localizar_arquivo_dashboard(token, site_id, mes_num, ano_num)
-    linha = encontrar_linha_da_data(token, site_id, item_id, data_fechamento)
+    linha_data = encontrar_linha_da_data(token, site_id, item_id, data_fechamento)
+    linha, turno = determinar_linha_e_turno(token, site_id, item_id, linha_data)
+    payload["turno"] = turno
     preencher_linha(token, site_id, item_id, linha, payload)
 
-    # Envio de e-mail: só funciona depois que a permissão Mail.Send
-    # for concedida (Grant admin consent) no App Registration.
-    # Se ainda não foi liberada, comente a linha abaixo para não
-    # quebrar o restante do fluxo.
-    enviar_email_conferencia(token, payload)
+    # Envio de e-mail imediato DESATIVADO de propósito — agora só o
+    # job_conferencia_8h.py manda e-mail, 1x por dia, já consolidando
+    # Dia + Noite + Saipos + PagSeguro num único e-mail. Isso evita
+    # duplicar e-mails (um na hora do fechamento, outro na conciliação).
 
-    return {"status": "ok", "linha_preenchida": linha, "arquivo_id": item_id}
+    return {"status": "ok", "linha_preenchida": linha, "turno": turno, "arquivo_id": item_id}
