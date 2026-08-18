@@ -1,30 +1,36 @@
 """
-Job de Conciliação Diária — PagSeguro EDI vs Fechamento de Caixa (por turno)
-==============================================================================
+Job de Conciliacao Diaria - Ouro Preto
+=========================================
 
-Roda 1x por dia via GitHub Actions (ver .github/workflows/conferencia-diaria.yml).
+Roda 1x por dia via GitHub Actions.
 
-O que este script faz:
-1. Calcula a data de ontem (D-1).
-2. Lê na planilha "Fechamento de Caixa" as linhas daquele dia — pode ser
-   1 linha (loja sem 2 turnos) ou 2 linhas (turno DIA + turno NOITE),
-   pegando a hora exata de cada fechamento (gravada na Observação pelo
-   formulário, ex: "Fechado às 15:30").
-3. Busca as transações do PagSeguro EDI daquele dia (com horário exato
-   de cada uma) e separa quais caem dentro da janela de cada turno:
-     - DIA: da meia-noite até a hora do fechamento do turno DIA
-     - NOITE: da hora do fechamento do turno DIA até a hora do
-       fechamento do turno NOITE — mesmo que isso atravesse a meia-noite
-       (nesse caso, busca também as transações do dia seguinte)
-4. Compara o total de cada turno com o Débito+Crédito declarado no
-   formulário daquele turno, e envia um e-mail de resumo por turno.
+Fontes cruzadas:
+- Saipos (o "Sistema") - fonte principal de comparacao para cada forma de
+  pagamento, incluindo o relatorio detalhado de vendas em Dinheiro.
+- Planilha (o que o gerente contou fisicamente e lancou no formulario).
+- PagSeguro - confere de forma independente Debito, Credito, PIX e
+  Voucher/Vale Refeicao (que realmente passam pela maquininha).
+- Banco Inter - usado so para detectar excecoes (PIX que caiu direto no
+  CNPJ, fora do fluxo normal do PagSeguro).
 
-Piloto: só a loja Ouro Preto por enquanto.
+Categorizacao dos pagamentos do Saipos (baseado em testes reais):
+- "Dinheiro"                  -> Dinheiro (secao propria, com relatorio)
+- "Debito"/"Credito"          -> Cartao (cruza com PagSeguro)
+- "Pix"                       -> PIX (cruza com PagSeguro)
+- Vale Refeicao real (Sodexo, VR, Alelo, Ticket, "Vale Refeicao")
+                               -> Voucher/Vale (cruza com PagSeguro)
+- "Pago Online" e "Voucher Parceiro Desconto" (repasse iFood/99Food)
+                               -> Online/Parceiros (so Saipos x Planilha,
+                                  nao passa por nenhum banco/adquirente)
+- "Cortesia"                  -> Cortesia (so Saipos x Planilha)
+- Qualquer outro nome         -> Outros (aparece no log para revisao)
 
-Variáveis de ambiente esperadas (GitHub Secrets):
-- AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-- PAGSEGURO_USER_OUROPRETO, PAGSEGURO_TOKEN_OUROPRETO
-- EMAIL_REMETENTE_MAILBOX, EMAIL_DESTINATARIO
+ATENCAO - premissas ainda nao 100% confirmadas com dados reais:
+- O nome exato que o PagSeguro usa para Voucher/Vale Refeicao no campo
+  'arranjo_ur' ainda nao foi visto em um teste real (so vimos DEBIT_*,
+  CREDIT_* e PIX ate agora). Usamos uma lista de palpites (ver eh_voucher).
+  Se aparecer 'DESCONHECIDO' na coluna PagSeguro do Voucher, precisamos
+  ajustar isso com um teste real assim que houver uma venda em voucher.
 """
 
 import os
@@ -34,6 +40,9 @@ from datetime import date, datetime, timedelta
 import requests
 from requests.auth import HTTPBasicAuth
 
+# ─────────────────────────────────────────────
+# CONFIGURACAO
+# ─────────────────────────────────────────────
 TENANT_ID = os.environ["AZURE_TENANT_ID"]
 CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["AZURE_CLIENT_SECRET"]
@@ -48,6 +57,14 @@ EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO", "gestaojapanobre@gmail
 PAGSEGURO_USER = os.environ["PAGSEGURO_USER_OUROPRETO"]
 PAGSEGURO_TOKEN = os.environ["PAGSEGURO_TOKEN_OUROPRETO"]
 
+INTER_CLIENT_ID = os.environ["INTER_CLIENT_ID_OUROPRETO"]
+INTER_CLIENT_SECRET = os.environ["INTER_CLIENT_SECRET_OUROPRETO"]
+INTER_CERT_PATH = os.environ.get("INTER_CERT_PATH", "inter_cert.pem")
+INTER_KEY_PATH = os.environ.get("INTER_KEY_PATH", "inter_key.pem")
+
+SAIPOS_TOKEN = os.environ["SAIPOS_TOKEN"]
+SAIPOS_ID_STORE_OUROPRETO = 71180
+
 CIDADE = "Ouro Preto"
 
 MESES_PT = {
@@ -56,7 +73,23 @@ MESES_PT = {
     9: "09 - Setembro", 10: "10 - Outubro", 11: "11 - Novembro", 12: "12 - Dezembro",
 }
 
+# Colunas da planilha "Fechamento de Caixa" (A=data, depois os meios)
+COLUNA_PLANILHA = {
+    "dinheiro": "B",
+    "cortesia": "C",
+    "debito": "D",
+    "credito": "E",
+    "online": "F",
+    "saipos_proprio": "G",
+    "vale": "H",
+    "voucher": "I",
+    "pix": "J",
+}
 
+
+# ─────────────────────────────────────────────
+# HELPERS DE HORA
+# ─────────────────────────────────────────────
 def parse_minutos(hora_str):
     partes = hora_str.split(":")
     return int(partes[0]) * 60 + int(partes[1])
@@ -69,6 +102,9 @@ def _extrair_hora_fechamento(obs_texto):
     return m.group(1) if m else None
 
 
+# ─────────────────────────────────────────────
+# PAGSEGURO EDI
+# ─────────────────────────────────────────────
 def buscar_transacoes_pagseguro(data_str):
     url = f"https://edi.api.pagbank.com.br/movement/v3.00/transactional/{data_str}"
     params = {"pageNumber": 1, "pageSize": 1000}
@@ -78,21 +114,191 @@ def buscar_transacoes_pagseguro(data_str):
     validado = resp.headers.get("VALIDADO", "false").lower() == "true"
     detalhes = resp.json().get("detalhes", [])
     transacoes = [
-        (item.get("hora_inicial_transacao", "00:00:00"), float(item.get("valor_total_transacao", 0)))
+        (
+            item.get("hora_inicial_transacao", "00:00:00"),
+            float(item.get("valor_total_transacao", 0)),
+            item.get("arranjo_ur", "DESCONHECIDO"),
+        )
         for item in detalhes
     ]
     return transacoes, validado
 
 
-def somar_janela(transacoes, minuto_inicio, minuto_fim):
+def eh_cartao(arranjo):
+    return arranjo.startswith("DEBIT_") or arranjo.startswith("CREDIT_")
+
+
+def eh_pix(arranjo):
+    return arranjo == "PIX"
+
+
+def eh_voucher(arranjo):
+    """Palpite ainda nao confirmado com dados reais - ajustar quando
+    tivermos um dia com venda em voucher/vale refeicao no PagSeguro."""
+    a = arranjo.upper()
+    return any(p in a for p in ["VOUCHER", "VR", "VA", "ALELO", "SODEXO", "TICKET"])
+
+
+def somar_janela(transacoes, minuto_inicio, minuto_fim, filtro=None):
     total = 0.0
-    for hora, valor in transacoes:
+    for hora, valor, arranjo in transacoes:
         m = parse_minutos(hora)
         if minuto_inicio <= m < minuto_fim:
-            total += valor
+            if filtro is None or filtro(arranjo):
+                total += valor
     return total
 
 
+# ─────────────────────────────────────────────
+# BANCO INTER (so para excecoes de PIX)
+# ─────────────────────────────────────────────
+def obter_token_inter():
+    url = "https://cdpj.partners.bancointer.com.br/oauth/v2/token"
+    resp = requests.post(
+        url,
+        data={
+            "client_id": INTER_CLIENT_ID,
+            "client_secret": INTER_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+            "scope": "extrato.read",
+        },
+        cert=(INTER_CERT_PATH, INTER_KEY_PATH),
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def buscar_pix_recebido_inter(data_str):
+    token = obter_token_inter()
+    url = "https://cdpj.partners.bancointer.com.br/banking/v2/extrato"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        params={"dataInicio": data_str, "dataFim": data_str},
+        cert=(INTER_CERT_PATH, INTER_KEY_PATH),
+    )
+    resp.raise_for_status()
+    transacoes = resp.json().get("transacoes", [])
+
+    total_pix = 0.0
+    for t in transacoes:
+        if t.get("tipoTransacao", "").upper() == "PIX" and t.get("tipoOperacao", "").upper() == "C":
+            total_pix += float(t.get("valor", 0))
+    return total_pix
+
+
+def checar_excecao_pix_inter(data_str, total_pix_pagseguro):
+    try:
+        total_pix_inter = buscar_pix_recebido_inter(data_str)
+    except Exception as e:
+        print(f"Nao foi possivel checar excecoes no Banco Inter: {e}")
+        return None
+
+    diferenca = total_pix_inter - total_pix_pagseguro
+    print(f"Checagem de excecao - Inter: R$ {total_pix_inter:.2f} | PagSeguro: R$ {total_pix_pagseguro:.2f}")
+
+    if diferenca > 5:
+        print(f"Possivel PIX direto no CNPJ detectado: R$ {diferenca:.2f}")
+        return (total_pix_inter, total_pix_pagseguro, diferenca)
+    return None
+
+
+# ─────────────────────────────────────────────
+# SAIPOS
+# ─────────────────────────────────────────────
+def categorizar_pagamento_saipos(desc):
+    """Classifica o texto livre do Saipos (desc_store_payment_type) em
+    uma das categorias que usamos na conciliacao."""
+    d = (desc or "").lower()
+    if "dinheiro" in d:
+        return "dinheiro"
+    if "cortesia" in d:
+        return "cortesia"
+    if "crédito" in d or "credito" in d:
+        return "credito"
+    if "débito" in d or "debito" in d:
+        return "debito"
+    if "pix" in d:
+        return "pix"
+    if "voucher parceiro" in d or "pago online" in d or "online" in d:
+        return "online_parceiro"
+    if "vale" in d or "voucher" in d or "sodexo" in d or "alelo" in d or "ticket" in d:
+        return "voucher_vale"
+    return "outros"
+
+
+def buscar_vendas_saipos(data_str):
+    """Busca todas as vendas do dia (todas as lojas), com paginacao e
+    nova tentativa em caso de timeout (504) da API do Saipos."""
+    url = "https://data.saipos.io/v1/search_sales"
+    headers = {"Authorization": f"Bearer {SAIPOS_TOKEN}"}
+
+    vendas = []
+    offset = 0
+    while True:
+        params = {
+            "p_date_column_filter": "shift_date",
+            "p_filter_date_start": f"{data_str}T00:00:00",
+            "p_filter_date_end": f"{data_str}T23:59:59",
+            "p_limit": 1000,
+            "p_offset": offset,
+        }
+        for tentativa in range(3):
+            resp = requests.get(url, headers=headers, params=params)
+            if resp.status_code == 200:
+                break
+            print(f"Saipos respondeu {resp.status_code}, tentativa {tentativa + 1}/3: {resp.text[:200]}")
+        else:
+            raise RuntimeError(f"Saipos nao respondeu 200 apos 3 tentativas (offset={offset})")
+
+        pagina = resp.json()
+        if not isinstance(pagina, list):
+            raise RuntimeError(f"Resposta inesperada do Saipos: {resp.text[:300]}")
+
+        vendas.extend(pagina)
+        if len(pagina) < 1000:
+            break
+        offset += 1000
+
+    return [v for v in vendas if v.get("id_store") == SAIPOS_ID_STORE_OUROPRETO and v.get("canceled") != "S"]
+
+
+def montar_dados_saipos_por_turno(data_str):
+    """Retorna um dict por turno ('Dia'/'Noite'/'Desconhecido'), cada um com:
+    - categorias: {categoria: valor_total}
+    - dinheiro_detalhe: lista de {pedido, hora, valor} das vendas em dinheiro
+    """
+    vendas = buscar_vendas_saipos(data_str)
+
+    dados = {}
+    for v in vendas:
+        turno = (v.get("store_shift") or {}).get("desc_store_shift", "Desconhecido")
+        if turno not in dados:
+            dados[turno] = {"categorias": {}, "dinheiro_detalhe": []}
+
+        for p in (v.get("payments") or []):
+            desc = p.get("desc_store_payment_type", "")
+            valor = float(p.get("payment_amount", 0))
+            categoria = categorizar_pagamento_saipos(desc)
+
+            dados[turno]["categorias"][categoria] = dados[turno]["categorias"].get(categoria, 0.0) + valor
+
+            if categoria == "dinheiro":
+                dados[turno]["dinheiro_detalhe"].append({
+                    "pedido": v.get("sale_number") or v.get("id_sale"),
+                    "hora": (p.get("created_at") or v.get("created_at") or "")[11:16],
+                    "valor": valor,
+                })
+
+            if categoria == "outros":
+                print(f"Forma de pagamento nao categorizada: '{desc}' (venda {v.get('sale_number')})")
+
+    return dados
+
+
+# ─────────────────────────────────────────────
+# MICROSOFT GRAPH (SharePoint / Excel)
+# ─────────────────────────────────────────────
 def obter_token_graph():
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
@@ -155,6 +361,8 @@ def _celula_para_data(valor):
 
 
 def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
+    """Le a aba Fechamento de Caixa (colunas A ate M) e retorna 1 ou 2
+    dicts (1 por turno), cada um com os valores de cada coluna da planilha."""
     sheet = "Fechamento de Caixa"
     url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/workbook/worksheets('{sheet}')/range(address='A1:M61')"
     headers = {"Authorization": f"Bearer {token}"}
@@ -177,14 +385,21 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
                     linhas_encontradas.append(proxima)
             break
 
+    def valor_coluna(linha, letra):
+        indices = {"B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6, "H": 7, "I": 8, "J": 9}
+        idx = indices[letra]
+        return float(linha[idx]) if len(linha) > idx and linha[idx] else 0.0
+
     resultado = []
     for linha in linhas_encontradas:
-        debito = float(linha[3]) if len(linha) > 3 and linha[3] else 0.0
-        credito = float(linha[4]) if len(linha) > 4 and linha[4] else 0.0
+        planilha = {chave: valor_coluna(linha, col) for chave, col in COLUNA_PLANILHA.items()}
+        total_contado = float(linha[10]) if len(linha) > 10 and linha[10] else None
         obs = linha[12] if len(linha) > 12 else ""
         resultado.append({
-            "debito_credito": debito + credito,
+            "planilha": planilha,
+            "total_contado": total_contado,
             "hora_fechamento": _extrair_hora_fechamento(obs),
+            "observacao": obs,
         })
 
     if len(resultado) == 1:
@@ -196,50 +411,205 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
     return resultado
 
 
-def enviar_email_resumo(token, data_str, turno, total_pagseguro, total_planilha, validado):
+# ─────────────────────────────────────────────
+# MONTAGEM DO E-MAIL
+# ─────────────────────────────────────────────
+def _classificar_farol(diferenca, limite_verde=5, limite_amarelo=30):
+    a = abs(diferenca)
+    if a <= limite_verde:
+        return "verde", "OK"
+    elif a <= limite_amarelo:
+        return "amarelo", "Verificar"
+    else:
+        return "vermelho", "Urgente"
+
+
+CORES_FAROL = {
+    "verde": ("#E8F8EF", "#27AE60"),
+    "amarelo": ("#FDF3E7", "#E67E22"),
+    "vermelho": ("#FBE9E7", "#E74C3C"),
+    "cinza": ("#F0F0F0", "#999999"),
+}
+
+
+def _linha_tabela(turno_label, fonte, saipos_val, planilha_val, pagseguro_val=None):
+    """Monta uma linha <tr> da tabela principal. pagseguro_val=None significa
+    'nao aplicavel' (mostra traco)."""
+    if saipos_val is None or planilha_val is None:
+        cor_fundo, cor_texto = CORES_FAROL["cinza"]
+        status = "N/D"
+        diferenca_txt = "—"
+    else:
+        diferenca = saipos_val - planilha_val
+        farol, status = _classificar_farol(diferenca)
+        cor_fundo, cor_texto = CORES_FAROL[farol]
+        diferenca_txt = f"R$ {diferenca:.2f}"
+
+    pagseguro_txt = f"R$ {pagseguro_val:.2f}" if pagseguro_val is not None else "—"
+    saipos_txt = f"R$ {saipos_val:.2f}" if saipos_val is not None else "—"
+    planilha_txt = f"R$ {planilha_val:.2f}" if planilha_val is not None else "—"
+
+    return f"""
+    <tr>
+      <td style="padding:8px 10px;border:1px solid #ddd;">{fonte}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{saipos_txt}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{planilha_txt}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{diferenca_txt}</td>
+      <td align="center" style="padding:8px 10px;border:1px solid #ddd;background:{cor_fundo};color:{cor_texto};font-weight:700;">{status}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;color:#888;">{pagseguro_txt}</td>
+    </tr>
+    """
+
+
+def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_categoria):
+    """Monta as linhas da tabela principal para um turno (exclui Dinheiro,
+    que tem secao propria)."""
+    linhas_html = []
+
+    mapeamentos = [
+        ("Débito", "debito", "debito", "cartao"),
+        ("Crédito", "credito", "credito", "cartao"),
+        ("PIX", "pix", "pix", "pix"),
+        ("Voucher/Vale Refeição", "voucher_vale", "vale_voucher_soma", "voucher"),
+        ("Online/Parceiros (iFood, 99Food etc.)", "online_parceiro", "online", None),
+        ("Cortesia", "cortesia", "cortesia", None),
+    ]
+
+    for fonte_label, cat_saipos, cat_planilha, cat_pagseguro in mapeamentos:
+        saipos_val = saipos_categorias.get(cat_saipos, 0.0)
+
+        if cat_planilha == "vale_voucher_soma":
+            planilha_val = planilha.get("vale", 0.0) + planilha.get("voucher", 0.0)
+        else:
+            planilha_val = planilha.get(cat_planilha, 0.0)
+
+        pagseguro_val = pagseguro_por_categoria.get(cat_pagseguro) if cat_pagseguro else None
+
+        linhas_html.append(_linha_tabela(turno_label, fonte_label, saipos_val, planilha_val, pagseguro_val))
+
+    tabela = f"""
+    <h3 style="margin:18px 0 6px;color:#333;">{"Turno " + turno_label if turno_label else "Fechamento do dia"}</h3>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
+      <tr style="background:#F0F0F0;">
+        <th align="left" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Fonte</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Saipos</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Planilha</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
+        <th align="center" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Status</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">PagSeguro</th>
+      </tr>
+      {"".join(linhas_html)}
+    </table>
+    """
+    return tabela
+
+
+def montar_secao_dinheiro(turno_label, planilha_dinheiro, saipos_dinheiro_total, detalhe):
+    diferenca = saipos_dinheiro_total - planilha_dinheiro
+    farol, status = _classificar_farol(diferenca)
+    cor_fundo, cor_texto = CORES_FAROL[farol]
+
+    linhas_detalhe = ""
+    for item in sorted(detalhe, key=lambda x: x["hora"]):
+        linhas_detalhe += f"""
+        <tr>
+          <td style="padding:6px 10px;border:1px solid #eee;">{item['pedido']}</td>
+          <td style="padding:6px 10px;border:1px solid #eee;">{item['hora']}</td>
+          <td align="right" style="padding:6px 10px;border:1px solid #eee;">R$ {item['valor']:.2f}</td>
+        </tr>
+        """
+
+    tabela_detalhe = ""
+    if detalhe:
+        tabela_detalhe = f"""
+        <p style="font-size:12px;color:#888;margin:10px 0 4px;">
+          Detalhe das vendas em dinheiro ({len(detalhe)} pedido(s)) — use pedido e hora para conferir na câmera, se necessário:
+        </p>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+          <tr style="background:#F7F7F7;">
+            <th align="left" style="padding:6px 10px;border:1px solid #eee;color:#777;">Pedido</th>
+            <th align="left" style="padding:6px 10px;border:1px solid #eee;color:#777;">Hora</th>
+            <th align="right" style="padding:6px 10px;border:1px solid #eee;color:#777;">Valor</th>
+          </tr>
+          {linhas_detalhe}
+        </table>
+        """
+
+    return f"""
+    <h3 style="margin:18px 0 6px;color:#333;">Dinheiro{" - Turno " + turno_label if turno_label else ""}</h3>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
+      <tr style="background:#F0F0F0;">
+        <th align="left" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Qtd. vendas</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Saipos</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Planilha</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
+        <th align="center" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Status</th>
+      </tr>
+      <tr>
+        <td style="padding:8px 10px;border:1px solid #ddd;">{len(detalhe)}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {saipos_dinheiro_total:.2f}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {planilha_dinheiro:.2f}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {diferenca:.2f}</td>
+        <td align="center" style="padding:8px 10px;border:1px solid #ddd;background:{cor_fundo};color:{cor_texto};font-weight:700;">{status}</td>
+      </tr>
+    </table>
+    {tabela_detalhe}
+    """
+
+
+def enviar_email_conciliacao(token, data_str, secoes_html, excecao_pix=None):
     ano_f, mes_f, dia_f = data_str.split("-")
     data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
-    turno_label = f" {turno}" if turno else ""
 
-    if total_pagseguro is None:
-        farol_emoji = "⚪"
-        corpo_extra = "<p>Não foi possível conciliar automaticamente este turno — hora de fechamento não encontrada na planilha.</p>"
-        diferenca_txt = "—"
-        total_pagseguro_txt = "não calculado"
-    elif total_planilha is None:
-        farol_emoji = "⚪"
-        corpo_extra = "<p>Fechamento de caixa daquele dia/turno ainda não foi encontrado na planilha.</p>"
-        diferenca_txt = "—"
-        total_pagseguro_txt = f"R$ {total_pagseguro:.2f}"
-    else:
-        diferenca = total_pagseguro - total_planilha
-        a = abs(diferenca)
-        if a <= 5:
-            farol_emoji, msg = "🟢", "Bateu certinho"
-        elif a <= 30:
-            farol_emoji, msg = "🟡", "Pequena diferença — verificar"
-        else:
-            farol_emoji, msg = "🔴", "Diferença relevante — verificar com urgência"
-        diferenca_txt = f"R$ {diferenca:.2f} — {msg}"
-        total_pagseguro_txt = f"R$ {total_pagseguro:.2f}"
-        corpo_extra = ""
-
-    aviso_validado = "" if validado else "<p style='color:#c00'><b>⚠️ Atenção:</b> o PagSeguro ainda não confirmou que os dados desse período estão totalmente processados (VALIDADO=false). Os números abaixo podem estar incompletos.</p>"
+    secao_excecao = ""
+    if excecao_pix:
+        total_inter, total_pagseguro, diferenca = excecao_pix
+        secao_excecao = f"""
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #F5D9A8;background:#FFF9E6;border-radius:6px;margin-top:16px;">
+          <tr><td style="padding:12px 14px;font-size:12px;color:#666;">
+            <b style="color:#8a6d1e;">Possível PIX direto no CNPJ:</b> o Banco Inter recebeu
+            R$ {diferenca:.2f} a mais em PIX do que o registrado no PagSeguro
+            (Inter R$ {total_inter:.2f} x PagSeguro R$ {total_pagseguro:.2f}).
+            Confira e some manualmente ao fechamento, se confirmado.
+          </td></tr>
+        </table>
+        """
 
     corpo_html = f"""
-    <h2>{farol_emoji} Fechamento Caixa {CIDADE}{turno_label} - {data_formatada}</h2>
-    {aviso_validado}
-    {corpo_extra}
-    <p><b>Total em cartão (PagSeguro EDI):</b> {total_pagseguro_txt}</p>
-    <p><b>Total Débito+Crédito (declarado no fechamento):</b> {"R$ %.2f" % total_planilha if total_planilha is not None else "não encontrado"}</p>
-    <p><b>Diferença:</b> {diferenca_txt}</p>
+    <html><body style="margin:0;padding:0;background:#f2f2f2;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f2f2;padding:24px 0;">
+    <tr><td align="center">
+    <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08);">
+      <tr>
+        <td style="background:#6B0A0A;padding:16px 24px;">
+          <div style="color:#E8C547;font-size:18px;font-weight:800;">Fechamento de Caixa</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:16px 24px 4px;font-size:13px;">
+          <b>Loja:</b> Japa Nobre — {CIDADE} &nbsp;|&nbsp; <b>Data:</b> {data_formatada}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 24px 20px;">
+          {"".join(secoes_html)}
+          {secao_excecao}
+          <div style="border-top:1px solid #eee;margin-top:20px;padding-top:12px;font-size:11px;color:#aaa;text-align:center;">
+            Gerado automaticamente pelo Portal Financeiro Japa Nobre
+          </div>
+        </td>
+      </tr>
+    </table>
+    </td></tr>
+    </table>
+    </body></html>
     """
 
     url = f"https://graph.microsoft.com/v1.0/users/{EMAIL_REMETENTE_MAILBOX}/sendMail"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "message": {
-            "subject": f"{farol_emoji} Fechamento Caixa {CIDADE}{turno_label} - {data_formatada}",
+            "subject": f"Fechamento Caixa {CIDADE} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
         }
@@ -248,6 +618,9 @@ def enviar_email_resumo(token, data_str, turno, total_pagseguro, total_planilha,
     resp.raise_for_status()
 
 
+# ─────────────────────────────────────────────
+# EXECUCAO PRINCIPAL
+# ─────────────────────────────────────────────
 def main():
     ontem = date.today() - timedelta(days=1)
     data_str = ontem.strftime("%Y-%m-%d")
@@ -259,55 +632,103 @@ def main():
     linhas = buscar_linhas_do_dia(token, site_id, item_id, ontem)
     print(f"Turnos encontrados na planilha: {len(linhas)}")
 
-    transacoes_hoje, validado_hoje = buscar_transacoes_pagseguro(data_str)
-    print(f"Transações PagSeguro em {data_str}: {len(transacoes_hoje)} — validado={validado_hoje}")
-
     if not linhas:
         print("Nenhuma linha encontrada para esse dia na planilha. Encerrando.")
         return
 
+    transacoes_hoje, validado_hoje = buscar_transacoes_pagseguro(data_str)
+    print(f"Transacoes PagSeguro em {data_str}: {len(transacoes_hoje)} - validado={validado_hoje}")
+
+    try:
+        saipos_por_turno = montar_dados_saipos_por_turno(data_str)
+        print(f"Turnos encontrados no Saipos: {list(saipos_por_turno.keys())}")
+    except Exception as e:
+        print(f"Falha ao buscar dados do Saipos: {e}")
+        saipos_por_turno = {}
+
+    secoes_html = []
+    total_pix_dia_inteiro = 0.0
+
     if len(linhas) == 1:
-        total_pagseguro = sum(v for _, v in transacoes_hoje)
-        enviar_email_resumo(token, data_str, None, total_pagseguro, linhas[0]["debito_credito"], validado_hoje)
-        print("E-mail enviado (sem separação de turno).")
-        return
+        info = linhas[0]
+        total_cartao = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_cartao)
+        total_pix = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_pix)
+        total_voucher_pg = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_voucher)
+        total_pix_dia_inteiro = total_pix
 
-    dia_info, noite_info = linhas[0], linhas[1]
-    hora_dia = dia_info["hora_fechamento"]
-    hora_noite = noite_info["hora_fechamento"]
+        saipos_geral = {"categorias": {}, "dinheiro_detalhe": []}
+        for turno_dados in saipos_por_turno.values():
+            for cat, val in turno_dados["categorias"].items():
+                saipos_geral["categorias"][cat] = saipos_geral["categorias"].get(cat, 0.0) + val
+            saipos_geral["dinheiro_detalhe"].extend(turno_dados["dinheiro_detalhe"])
 
-    if hora_dia:
-        m_dia = parse_minutos(hora_dia)
-        total_dia = somar_janela(transacoes_hoje, 0, m_dia)
-        enviar_email_resumo(token, data_str, "DIA", total_dia, dia_info["debito_credito"], validado_hoje)
-        print(f"Turno DIA: PagSeguro R$ {total_dia:.2f} | Planilha R$ {dia_info['debito_credito']:.2f}")
+        pagseguro_por_categoria = {"cartao": total_cartao, "pix": total_pix, "voucher": total_voucher_pg}
+
+        secoes_html.append(montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria))
+        secoes_html.append(montar_secao_dinheiro(
+            None,
+            info["planilha"].get("dinheiro", 0.0),
+            saipos_geral["categorias"].get("dinheiro", 0.0),
+            saipos_geral["dinheiro_detalhe"],
+        ))
+
     else:
-        enviar_email_resumo(token, data_str, "DIA", None, dia_info["debito_credito"], validado_hoje)
-        print("Turno DIA: sem hora de fechamento registrada, não foi possível conciliar.")
+        dia_info, noite_info = linhas[0], linhas[1]
+        hora_dia = dia_info["hora_fechamento"]
+        hora_noite = noite_info["hora_fechamento"]
 
-    if hora_dia and hora_noite:
-        m_dia = parse_minutos(hora_dia)
-        m_noite = parse_minutos(hora_noite)
-        cruzou_meia_noite = m_noite <= m_dia
+        total_cartao_dia = total_pix_dia = total_voucher_dia = 0.0
+        total_cartao_noite = total_pix_noite = total_voucher_noite = 0.0
 
-        total_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60)
-        validado_noite = validado_hoje
+        if hora_dia:
+            m_dia = parse_minutos(hora_dia)
+            total_cartao_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_cartao)
+            total_pix_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_pix)
+            total_voucher_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_voucher)
 
-        if cruzou_meia_noite:
-            amanha = ontem + timedelta(days=1)
-            amanha_str = amanha.strftime("%Y-%m-%d")
-            print(f"Turno NOITE cruza a meia-noite — buscando também {amanha_str}")
-            transacoes_amanha, validado_amanha = buscar_transacoes_pagseguro(amanha_str)
-            total_noite += somar_janela(transacoes_amanha, 0, m_noite)
-            validado_noite = validado_hoje and validado_amanha
+        if hora_dia and hora_noite:
+            m_dia = parse_minutos(hora_dia)
+            m_noite = parse_minutos(hora_noite)
+            cruzou_meia_noite = m_noite <= m_dia
 
-        enviar_email_resumo(token, data_str, "NOITE", total_noite, noite_info["debito_credito"], validado_noite)
-        print(f"Turno NOITE: PagSeguro R$ {total_noite:.2f} | Planilha R$ {noite_info['debito_credito']:.2f}")
-    else:
-        enviar_email_resumo(token, data_str, "NOITE", None, noite_info["debito_credito"], validado_hoje)
-        print("Turno NOITE: sem hora de fechamento registrada, não foi possível conciliar.")
+            total_cartao_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_cartao)
+            total_pix_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_pix)
+            total_voucher_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_voucher)
 
-    print("Concluído.")
+            if cruzou_meia_noite:
+                amanha_str = (ontem + timedelta(days=1)).strftime("%Y-%m-%d")
+                print(f"Turno NOITE cruza a meia-noite - buscando tambem {amanha_str}")
+                transacoes_amanha, _ = buscar_transacoes_pagseguro(amanha_str)
+                total_cartao_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_cartao)
+                total_pix_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_pix)
+                total_voucher_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_voucher)
+
+        total_pix_dia_inteiro = total_pix_dia + total_pix_noite
+
+        saipos_dia = saipos_por_turno.get("Dia", {"categorias": {}, "dinheiro_detalhe": []})
+        saipos_noite = saipos_por_turno.get("Noite", {"categorias": {}, "dinheiro_detalhe": []})
+
+        secoes_html.append(montar_secao_turno(
+            "DIA", dia_info["planilha"], saipos_dia["categorias"],
+            {"cartao": total_cartao_dia, "pix": total_pix_dia, "voucher": total_voucher_dia},
+        ))
+        secoes_html.append(montar_secao_dinheiro(
+            "DIA", dia_info["planilha"].get("dinheiro", 0.0),
+            saipos_dia["categorias"].get("dinheiro", 0.0), saipos_dia["dinheiro_detalhe"],
+        ))
+
+        secoes_html.append(montar_secao_turno(
+            "NOITE", noite_info["planilha"], saipos_noite["categorias"],
+            {"cartao": total_cartao_noite, "pix": total_pix_noite, "voucher": total_voucher_noite},
+        ))
+        secoes_html.append(montar_secao_dinheiro(
+            "NOITE", noite_info["planilha"].get("dinheiro", 0.0),
+            saipos_noite["categorias"].get("dinheiro", 0.0), saipos_noite["dinheiro_detalhe"],
+        ))
+
+    excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro)
+    enviar_email_conciliacao(token, data_str, secoes_html, excecao)
+    print("E-mail unico enviado com sucesso.")
 
 
 if __name__ == "__main__":
