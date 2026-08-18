@@ -267,6 +267,7 @@ def montar_dados_saipos_por_turno(data_str):
     """Retorna um dict por turno ('Dia'/'Noite'/'Desconhecido'), cada um com:
     - categorias: {categoria: valor_total}
     - dinheiro_detalhe: lista de {pedido, hora, valor} das vendas em dinheiro
+    - cortesia_detalhe: lista de {pedido, hora, valor} das vendas em cortesia
     """
     vendas = buscar_vendas_saipos(data_str)
 
@@ -274,7 +275,7 @@ def montar_dados_saipos_por_turno(data_str):
     for v in vendas:
         turno = (v.get("store_shift") or {}).get("desc_store_shift", "Desconhecido")
         if turno not in dados:
-            dados[turno] = {"categorias": {}, "dinheiro_detalhe": []}
+            dados[turno] = {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": []}
 
         for p in (v.get("payments") or []):
             desc = p.get("desc_store_payment_type", "")
@@ -283,12 +284,16 @@ def montar_dados_saipos_por_turno(data_str):
 
             dados[turno]["categorias"][categoria] = dados[turno]["categorias"].get(categoria, 0.0) + valor
 
+            item_detalhe = {
+                "pedido": v.get("sale_number") or v.get("id_sale"),
+                "hora": (p.get("created_at") or v.get("created_at") or "")[11:16],
+                "valor": valor,
+            }
+
             if categoria == "dinheiro":
-                dados[turno]["dinheiro_detalhe"].append({
-                    "pedido": v.get("sale_number") or v.get("id_sale"),
-                    "hora": (p.get("created_at") or v.get("created_at") or "")[11:16],
-                    "valor": valor,
-                })
+                dados[turno]["dinheiro_detalhe"].append(item_detalhe)
+            elif categoria == "cortesia":
+                dados[turno]["cortesia_detalhe"].append(item_detalhe)
 
             if categoria == "outros":
                 print(f"Forma de pagamento nao categorizada: '{desc}' (venda {v.get('sale_number')})")
@@ -371,6 +376,7 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
     valores = resp.json()["values"]
 
     linhas_encontradas = []
+    linhas_numeros = []
     for i, linha in enumerate(valores):
         celula_data = linha[0] if len(linha) > 0 else None
         if not celula_data:
@@ -378,11 +384,13 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
         data_linha = _celula_para_data(celula_data)
         if data_linha == data_alvo:
             linhas_encontradas.append(linha)
+            linhas_numeros.append(i + 1)  # linha real na planilha (1-indexed)
             if i + 1 < len(valores):
                 proxima = valores[i + 1]
                 tem_data_propria = len(proxima) > 0 and proxima[0]
                 if not tem_data_propria:
                     linhas_encontradas.append(proxima)
+                    linhas_numeros.append(i + 2)
             break
 
     def valor_coluna(linha, letra):
@@ -391,11 +399,12 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
         return float(linha[idx]) if len(linha) > idx and linha[idx] else 0.0
 
     resultado = []
-    for linha in linhas_encontradas:
+    for linha, num_linha in zip(linhas_encontradas, linhas_numeros):
         planilha = {chave: valor_coluna(linha, col) for chave, col in COLUNA_PLANILHA.items()}
         total_contado = float(linha[10]) if len(linha) > 10 and linha[10] else None
         obs = linha[12] if len(linha) > 12 else ""
         resultado.append({
+            "linha": num_linha,
             "planilha": planilha,
             "total_contado": total_contado,
             "hora_fechamento": _extrair_hora_fechamento(obs),
@@ -409,6 +418,18 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
         resultado[1]["turno"] = "NOITE"
 
     return resultado
+
+
+def escrever_valor_online_planilha(token, site_id, item_id, linha, valor_saipos):
+    """Escreve automaticamente o total do Saipos na coluna F (Online/Parceiros)
+    da linha do turno, fechando o preenchimento que antes dependia do
+    escritório digitar manualmente."""
+    sheet = "Fechamento de Caixa"
+    endereco = f"F{linha}"
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/workbook/worksheets('{sheet}')/range(address='{endereco}')"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = requests.patch(url, headers=headers, json={"values": [[valor_saipos]]})
+    resp.raise_for_status()
 
 
 # ─────────────────────────────────────────────
@@ -432,13 +453,22 @@ CORES_FAROL = {
 }
 
 
-def _linha_tabela(turno_label, fonte, saipos_val, planilha_val, pagseguro_val=None):
+def _linha_tabela(fonte, saipos_val, planilha_val, pagseguro_val=None, informativo=False):
     """Monta uma linha <tr> da tabela principal. pagseguro_val=None significa
-    'nao aplicavel' (mostra traco)."""
-    if saipos_val is None or planilha_val is None:
+    'nao aplicavel' (mostra traco). Se informativo=True, a linha nao entra no
+    calculo do farol (ex: Online/Parceiros, que a loja sempre lanca como 0
+    porque nao tem acesso a esse valor - quem preenche depois e o escritorio).
+    Retorna (html, farol_ou_none)."""
+    if informativo:
+        cor_fundo, cor_texto = CORES_FAROL["cinza"]
+        status = "Preenchido auto."
+        diferenca_txt = "—"
+        farol = None
+    elif saipos_val is None or planilha_val is None:
         cor_fundo, cor_texto = CORES_FAROL["cinza"]
         status = "N/D"
         diferenca_txt = "—"
+        farol = None
     else:
         diferenca = saipos_val - planilha_val
         farol, status = _classificar_farol(diferenca)
@@ -449,33 +479,36 @@ def _linha_tabela(turno_label, fonte, saipos_val, planilha_val, pagseguro_val=No
     saipos_txt = f"R$ {saipos_val:.2f}" if saipos_val is not None else "—"
     planilha_txt = f"R$ {planilha_val:.2f}" if planilha_val is not None else "—"
 
-    return f"""
+    html = f"""
     <tr>
       <td style="padding:8px 10px;border:1px solid #ddd;">{fonte}</td>
-      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{saipos_txt}</td>
       <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{planilha_txt}</td>
-      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{diferenca_txt}</td>
-      <td align="center" style="padding:8px 10px;border:1px solid #ddd;background:{cor_fundo};color:{cor_texto};font-weight:700;">{status}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{saipos_txt}</td>
       <td align="right" style="padding:8px 10px;border:1px solid #ddd;color:#888;">{pagseguro_txt}</td>
+      <td align="center" style="padding:8px 10px;border:1px solid #ddd;background:{cor_fundo};color:{cor_texto};font-weight:700;">{status}</td>
+      <td align="right" style="padding:8px 10px;border:1px solid #ddd;">{diferenca_txt}</td>
     </tr>
     """
+    return html, farol
 
 
 def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_categoria):
-    """Monta as linhas da tabela principal para um turno (exclui Dinheiro,
-    que tem secao propria)."""
+    """Monta as linhas da tabela principal para um turno (exclui Dinheiro e
+    Cortesia, que tem secao propria com relatorio detalhado).
+    Retorna (html, lista_de_farois) - farois so das linhas que contam
+    para o farol geral (Online/Parceiros fica de fora, por ser informativo)."""
     linhas_html = []
+    farois = []
 
     mapeamentos = [
-        ("Débito", "debito", "debito", "cartao"),
-        ("Crédito", "credito", "credito", "cartao"),
-        ("PIX", "pix", "pix", "pix"),
-        ("Voucher/Vale Refeição", "voucher_vale", "vale_voucher_soma", "voucher"),
-        ("Online/Parceiros (iFood, 99Food etc.)", "online_parceiro", "online", None),
-        ("Cortesia", "cortesia", "cortesia", None),
+        ("Débito", "debito", "debito", "cartao", False),
+        ("Crédito", "credito", "credito", "cartao", False),
+        ("PIX", "pix", "pix", "pix", False),
+        ("Voucher/Vale Refeição", "voucher_vale", "vale_voucher_soma", "voucher", False),
+        ("Online/Parceiros (iFood, 99Food etc.)", "online_parceiro", "online", None, True),
     ]
 
-    for fonte_label, cat_saipos, cat_planilha, cat_pagseguro in mapeamentos:
+    for fonte_label, cat_saipos, cat_planilha, cat_pagseguro, informativo in mapeamentos:
         saipos_val = saipos_categorias.get(cat_saipos, 0.0)
 
         if cat_planilha == "vale_voucher_soma":
@@ -485,27 +518,42 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
 
         pagseguro_val = pagseguro_por_categoria.get(cat_pagseguro) if cat_pagseguro else None
 
-        linhas_html.append(_linha_tabela(turno_label, fonte_label, saipos_val, planilha_val, pagseguro_val))
+        html, farol = _linha_tabela(fonte_label, saipos_val, planilha_val, pagseguro_val, informativo=informativo)
+        linhas_html.append(html)
+        if farol:
+            farois.append(farol)
+
+    nota_online = """
+    <p style="font-size:11px;color:#999;margin:4px 0 0;">
+      * Online/Parceiros: a loja não tem acesso a esse valor no fechamento (sempre lança 0).
+      O valor mostrado na coluna Saipos acima já foi preenchido automaticamente na planilha
+      Dashboard pelo sistema. Essa linha não entra no status/farol do fechamento.
+    </p>
+    """
 
     tabela = f"""
     <h3 style="margin:18px 0 6px;color:#333;">{"Turno " + turno_label if turno_label else "Fechamento do dia"}</h3>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
       <tr style="background:#F0F0F0;">
         <th align="left" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Fonte</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Loja</th>
         <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Saipos</th>
-        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Planilha</th>
-        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
-        <th align="center" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Status</th>
         <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">PagSeguro</th>
+        <th align="center" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Status</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
       </tr>
       {"".join(linhas_html)}
     </table>
+    {nota_online}
     """
-    return tabela
+    return tabela, farois
 
 
-def montar_secao_dinheiro(turno_label, planilha_dinheiro, saipos_dinheiro_total, detalhe):
-    diferenca = saipos_dinheiro_total - planilha_dinheiro
+def _montar_secao_com_detalhe(titulo, turno_label, planilha_val, saipos_val, detalhe, mostrar_deposito=False):
+    """Funcao generica usada tanto para Dinheiro quanto para Cortesia -
+    mostra o total (Loja x Saipos) e a lista detalhada de pedidos/hora.
+    Retorna (html, farol)."""
+    diferenca = saipos_val - planilha_val
     farol, status = _classificar_farol(diferenca)
     cor_fundo, cor_texto = CORES_FAROL[farol]
 
@@ -523,7 +571,7 @@ def montar_secao_dinheiro(turno_label, planilha_dinheiro, saipos_dinheiro_total,
     if detalhe:
         tabela_detalhe = f"""
         <p style="font-size:12px;color:#888;margin:10px 0 4px;">
-          Detalhe das vendas em dinheiro ({len(detalhe)} pedido(s)) — use pedido e hora para conferir na câmera, se necessário:
+          Detalhe das vendas em {titulo.lower()} ({len(detalhe)} pedido(s)) — pedido e hora, para conferir na câmera se necessário:
         </p>
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
           <tr style="background:#F7F7F7;">
@@ -535,31 +583,71 @@ def montar_secao_dinheiro(turno_label, planilha_dinheiro, saipos_dinheiro_total,
         </table>
         """
 
-    return f"""
-    <h3 style="margin:18px 0 6px;color:#333;">Dinheiro{" - Turno " + turno_label if turno_label else ""}</h3>
+    bloco_deposito = ""
+    if mostrar_deposito:
+        bloco_deposito = f"""
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          <tr>
+            <td style="background:#FFF4D6;border:1px solid #E8C547;border-radius:6px;padding:10px 14px;font-size:14px;color:#6B4E00;font-weight:700;">
+              💰 Valor para depósito desse caixa: R$ {planilha_val:.2f}
+            </td>
+          </tr>
+        </table>
+        """
+
+    html = f"""
+    <h3 style="margin:18px 0 6px;color:#333;">{titulo}{" - Turno " + turno_label if turno_label else ""}</h3>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
       <tr style="background:#F0F0F0;">
         <th align="left" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Qtd. vendas</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Loja</th>
         <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Saipos</th>
-        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Planilha</th>
-        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
         <th align="center" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Status</th>
+        <th align="right" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Diferença</th>
       </tr>
       <tr>
         <td style="padding:8px 10px;border:1px solid #ddd;">{len(detalhe)}</td>
-        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {saipos_dinheiro_total:.2f}</td>
-        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {planilha_dinheiro:.2f}</td>
-        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {diferenca:.2f}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {planilha_val:.2f}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {saipos_val:.2f}</td>
         <td align="center" style="padding:8px 10px;border:1px solid #ddd;background:{cor_fundo};color:{cor_texto};font-weight:700;">{status}</td>
+        <td align="right" style="padding:8px 10px;border:1px solid #ddd;">R$ {diferenca:.2f}</td>
       </tr>
     </table>
+    {bloco_deposito}
     {tabela_detalhe}
     """
+    return html, farol
 
 
-def enviar_email_conciliacao(token, data_str, secoes_html, excecao_pix=None):
+def montar_secao_dinheiro(turno_label, planilha_dinheiro, saipos_dinheiro_total, detalhe):
+    return _montar_secao_com_detalhe("Dinheiro", turno_label, planilha_dinheiro, saipos_dinheiro_total, detalhe, mostrar_deposito=True)
+
+
+def montar_secao_cortesia(turno_label, planilha_cortesia, saipos_cortesia_total, detalhe):
+    return _montar_secao_com_detalhe("Cortesia", turno_label, planilha_cortesia, saipos_cortesia_total, detalhe, mostrar_deposito=False)
+
+
+FAROL_EMOJI = {"verde": "🟢", "amarelo": "🟡", "vermelho": "🔴"}
+FAROL_TEXTO = {"verde": "TUDO OK", "amarelo": "VERIFICAR", "vermelho": "URGENTE"}
+
+
+def calcular_farol_geral(farois):
+    if "vermelho" in farois:
+        return "vermelho"
+    if "amarelo" in farois:
+        return "amarelo"
+    if "verde" in farois:
+        return "verde"
+    return "cinza"
+
+
+def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None):
     ano_f, mes_f, dia_f = data_str.split("-")
     data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
+
+    farol_geral = calcular_farol_geral(farois_gerais)
+    emoji_geral = FAROL_EMOJI.get(farol_geral, "⚪")
+    texto_geral = FAROL_TEXTO.get(farol_geral, "SEM DADOS")
 
     secao_excecao = ""
     if excecao_pix:
@@ -582,7 +670,14 @@ def enviar_email_conciliacao(token, data_str, secoes_html, excecao_pix=None):
     <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08);">
       <tr>
         <td style="background:#6B0A0A;padding:16px 24px;">
-          <div style="color:#E8C547;font-size:18px;font-weight:800;">Fechamento de Caixa</div>
+          <table role="presentation" width="100%"><tr>
+            <td style="color:#E8C547;font-size:18px;font-weight:800;">Fechamento de Caixa</td>
+            <td align="right">
+              <span style="background:#fff;color:#333;font-size:12px;font-weight:700;padding:5px 12px;border-radius:20px;">
+                {emoji_geral} {texto_geral}
+              </span>
+            </td>
+          </tr></table>
         </td>
       </tr>
       <tr>
@@ -609,7 +704,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, excecao_pix=None):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "message": {
-            "subject": f"Fechamento Caixa {CIDADE} - {data_formatada}",
+            "subject": f"{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
         }
@@ -647,7 +742,11 @@ def main():
         saipos_por_turno = {}
 
     secoes_html = []
+    farois_gerais = []
     total_pix_dia_inteiro = 0.0
+
+    def _vazio_turno():
+        return {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": []}
 
     if len(linhas) == 1:
         info = linhas[0]
@@ -656,21 +755,32 @@ def main():
         total_voucher_pg = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_voucher)
         total_pix_dia_inteiro = total_pix
 
-        saipos_geral = {"categorias": {}, "dinheiro_detalhe": []}
+        saipos_geral = _vazio_turno()
         for turno_dados in saipos_por_turno.values():
             for cat, val in turno_dados["categorias"].items():
                 saipos_geral["categorias"][cat] = saipos_geral["categorias"].get(cat, 0.0) + val
             saipos_geral["dinheiro_detalhe"].extend(turno_dados["dinheiro_detalhe"])
+            saipos_geral["cortesia_detalhe"].extend(turno_dados["cortesia_detalhe"])
 
         pagseguro_por_categoria = {"cartao": total_cartao, "pix": total_pix, "voucher": total_voucher_pg}
 
-        secoes_html.append(montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria))
-        secoes_html.append(montar_secao_dinheiro(
-            None,
-            info["planilha"].get("dinheiro", 0.0),
-            saipos_geral["categorias"].get("dinheiro", 0.0),
-            saipos_geral["dinheiro_detalhe"],
-        ))
+        html, farois = montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria)
+        secoes_html.append(html)
+        farois_gerais.extend(farois)
+
+        try:
+            escrever_valor_online_planilha(token, site_id, item_id, info["linha"], saipos_geral["categorias"].get("online_parceiro", 0.0))
+            print(f"Valor Online escrito na planilha (linha {info['linha']}): R$ {saipos_geral['categorias'].get('online_parceiro', 0.0):.2f}")
+        except Exception as e:
+            print(f"Falha ao escrever valor Online na planilha: {e}")
+
+        html, farol = montar_secao_dinheiro(None, info["planilha"].get("dinheiro", 0.0), saipos_geral["categorias"].get("dinheiro", 0.0), saipos_geral["dinheiro_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
+
+        html, farol = montar_secao_cortesia(None, info["planilha"].get("cortesia", 0.0), saipos_geral["categorias"].get("cortesia", 0.0), saipos_geral["cortesia_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
 
     else:
         dia_info, noite_info = linhas[0], linhas[1]
@@ -705,29 +815,47 @@ def main():
 
         total_pix_dia_inteiro = total_pix_dia + total_pix_noite
 
-        saipos_dia = saipos_por_turno.get("Dia", {"categorias": {}, "dinheiro_detalhe": []})
-        saipos_noite = saipos_por_turno.get("Noite", {"categorias": {}, "dinheiro_detalhe": []})
+        saipos_dia = saipos_por_turno.get("Dia", _vazio_turno())
+        saipos_noite = saipos_por_turno.get("Noite", _vazio_turno())
 
-        secoes_html.append(montar_secao_turno(
-            "DIA", dia_info["planilha"], saipos_dia["categorias"],
-            {"cartao": total_cartao_dia, "pix": total_pix_dia, "voucher": total_voucher_dia},
-        ))
-        secoes_html.append(montar_secao_dinheiro(
-            "DIA", dia_info["planilha"].get("dinheiro", 0.0),
-            saipos_dia["categorias"].get("dinheiro", 0.0), saipos_dia["dinheiro_detalhe"],
-        ))
+        html, farois = montar_secao_turno("DIA", dia_info["planilha"], saipos_dia["categorias"], {"cartao": total_cartao_dia, "pix": total_pix_dia, "voucher": total_voucher_dia})
+        secoes_html.append(html)
+        farois_gerais.extend(farois)
 
-        secoes_html.append(montar_secao_turno(
-            "NOITE", noite_info["planilha"], saipos_noite["categorias"],
-            {"cartao": total_cartao_noite, "pix": total_pix_noite, "voucher": total_voucher_noite},
-        ))
-        secoes_html.append(montar_secao_dinheiro(
-            "NOITE", noite_info["planilha"].get("dinheiro", 0.0),
-            saipos_noite["categorias"].get("dinheiro", 0.0), saipos_noite["dinheiro_detalhe"],
-        ))
+        try:
+            escrever_valor_online_planilha(token, site_id, item_id, dia_info["linha"], saipos_dia["categorias"].get("online_parceiro", 0.0))
+            print(f"Valor Online DIA escrito na planilha (linha {dia_info['linha']}): R$ {saipos_dia['categorias'].get('online_parceiro', 0.0):.2f}")
+        except Exception as e:
+            print(f"Falha ao escrever valor Online DIA na planilha: {e}")
+
+        html, farol = montar_secao_dinheiro("DIA", dia_info["planilha"].get("dinheiro", 0.0), saipos_dia["categorias"].get("dinheiro", 0.0), saipos_dia["dinheiro_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
+
+        html, farol = montar_secao_cortesia("DIA", dia_info["planilha"].get("cortesia", 0.0), saipos_dia["categorias"].get("cortesia", 0.0), saipos_dia["cortesia_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
+
+        html, farois = montar_secao_turno("NOITE", noite_info["planilha"], saipos_noite["categorias"], {"cartao": total_cartao_noite, "pix": total_pix_noite, "voucher": total_voucher_noite})
+        secoes_html.append(html)
+        farois_gerais.extend(farois)
+
+        try:
+            escrever_valor_online_planilha(token, site_id, item_id, noite_info["linha"], saipos_noite["categorias"].get("online_parceiro", 0.0))
+            print(f"Valor Online NOITE escrito na planilha (linha {noite_info['linha']}): R$ {saipos_noite['categorias'].get('online_parceiro', 0.0):.2f}")
+        except Exception as e:
+            print(f"Falha ao escrever valor Online NOITE na planilha: {e}")
+
+        html, farol = montar_secao_dinheiro("NOITE", noite_info["planilha"].get("dinheiro", 0.0), saipos_noite["categorias"].get("dinheiro", 0.0), saipos_noite["dinheiro_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
+
+        html, farol = montar_secao_cortesia("NOITE", noite_info["planilha"].get("cortesia", 0.0), saipos_noite["categorias"].get("cortesia", 0.0), saipos_noite["cortesia_detalhe"])
+        secoes_html.append(html)
+        farois_gerais.append(farol)
 
     excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro)
-    enviar_email_conciliacao(token, data_str, secoes_html, excecao)
+    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao)
     print("E-mail unico enviado com sucesso.")
 
 
