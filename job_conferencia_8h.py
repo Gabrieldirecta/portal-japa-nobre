@@ -35,6 +35,7 @@ ATENCAO - premissas ainda nao 100% confirmadas com dados reais:
 
 import os
 import re
+import time
 from datetime import date, datetime, timedelta
 
 import requests
@@ -98,7 +99,9 @@ def parse_minutos(hora_str):
 def _extrair_hora_fechamento(obs_texto):
     if not obs_texto:
         return None
-    m = re.search(r"Fechado às (\d{2}:\d{2})", obs_texto)
+    # Tolerante a "Fechado às" (com acento) e "Fechado as" (sem acento) -
+    # a Azure Function grava sem acento, mas mantemos os dois por segurança.
+    m = re.search(r"Fechado \w*s? (\d{2}:\d{2})", obs_texto)
     return m.group(1) if m else None
 
 
@@ -248,8 +251,11 @@ def buscar_vendas_saipos(data_str):
             if resp.status_code == 200:
                 break
             print(f"Saipos respondeu {resp.status_code}, tentativa {tentativa + 1}/3: {resp.text[:200]}")
+            time.sleep(3 * (tentativa + 1))  # espera 3s, depois 6s, entre tentativas
         else:
             raise RuntimeError(f"Saipos nao respondeu 200 apos 3 tentativas (offset={offset})")
+
+        time.sleep(1)  # respiro entre paginas, para nao disparar limite de consultas
 
         pagina = resp.json()
         if not isinstance(pagina, list):
@@ -369,7 +375,7 @@ def buscar_linhas_do_dia(token, site_id, item_id, data_alvo):
     """Le a aba Fechamento de Caixa (colunas A ate M) e retorna 1 ou 2
     dicts (1 por turno), cada um com os valores de cada coluna da planilha."""
     sheet = "Fechamento de Caixa"
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/workbook/worksheets('{sheet}')/range(address='A1:M61')"
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/workbook/worksheets('{sheet}')/range(address='A1:M75')"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
@@ -801,8 +807,8 @@ def main():
         hora_dia = dia_info["hora_fechamento"]
         hora_noite = noite_info["hora_fechamento"]
 
-        total_cartao_dia = total_pix_dia = total_voucher_dia = 0.0
-        total_cartao_noite = total_pix_noite = total_voucher_noite = 0.0
+        total_cartao_dia = total_pix_dia = total_voucher_dia = None
+        total_cartao_noite = total_pix_noite = total_voucher_noite = None
 
         if hora_dia:
             m_dia = parse_minutos(hora_dia)
@@ -827,7 +833,7 @@ def main():
                 total_pix_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_pix)
                 total_voucher_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_voucher)
 
-        total_pix_dia_inteiro = total_pix_dia + total_pix_noite
+        total_pix_dia_inteiro = (total_pix_dia or 0) + (total_pix_noite or 0)
 
         saipos_dia = saipos_por_turno.get("Dia", _vazio_turno())
         saipos_noite = saipos_por_turno.get("Noite", _vazio_turno())
