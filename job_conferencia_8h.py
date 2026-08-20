@@ -232,7 +232,13 @@ def categorizar_pagamento_saipos(desc):
 
 def buscar_vendas_saipos(data_str):
     """Busca todas as vendas do dia (todas as lojas), com paginacao e
-    nova tentativa em caso de timeout (504) da API do Saipos."""
+    nova tentativa em caso de erro (403/504) da API do Saipos.
+
+    Parametros de retry/pausa alinhados com outro projeto que já
+    funciona de forma estável com essa mesma API: 5 tentativas com
+    espera crescente (20s, 40s, 60s, 80s, 100s), timeout de 120s por
+    chamada, e pausa de 5s entre páginas de paginação — isso evita
+    estourar o limite de consultas por minuto do lado do Saipos."""
     url = "https://data.saipos.io/v1/search_sales"
     headers = {"Authorization": f"Bearer {SAIPOS_TOKEN}"}
 
@@ -246,16 +252,17 @@ def buscar_vendas_saipos(data_str):
             "p_limit": 1000,
             "p_offset": offset,
         }
-        for tentativa in range(3):
-            resp = requests.get(url, headers=headers, params=params)
+        for tentativa in range(5):
+            resp = requests.get(url, headers=headers, params=params, timeout=120)
             if resp.status_code == 200:
                 break
-            print(f"Saipos respondeu {resp.status_code}, tentativa {tentativa + 1}/3: {resp.text[:200]}")
-            time.sleep(3 * (tentativa + 1))  # espera 3s, depois 6s, entre tentativas
+            espera = 20 * (tentativa + 1)  # 20s, 40s, 60s, 80s, 100s
+            print(f"Saipos respondeu {resp.status_code}, tentativa {tentativa + 1}/5 — aguardando {espera}s: {resp.text[:200]}")
+            time.sleep(espera)
         else:
-            raise RuntimeError(f"Saipos nao respondeu 200 apos 3 tentativas (offset={offset})")
+            raise RuntimeError(f"Saipos nao respondeu 200 apos 5 tentativas (offset={offset})")
 
-        time.sleep(1)  # respiro entre paginas, para nao disparar limite de consultas
+        time.sleep(5)  # pausa entre páginas, para nao disparar limite de consultas
 
         pagina = resp.json()
         if not isinstance(pagina, list):
