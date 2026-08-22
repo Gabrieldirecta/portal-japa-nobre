@@ -127,8 +127,12 @@ def buscar_transacoes_pagseguro(data_str):
     return transacoes, validado
 
 
-def eh_cartao(arranjo):
-    return arranjo.startswith("DEBIT_") or arranjo.startswith("CREDIT_")
+def eh_debito(arranjo):
+    return arranjo.startswith("DEBIT_")
+
+
+def eh_credito(arranjo):
+    return arranjo.startswith("CREDIT_")
 
 
 def eh_pix(arranjo):
@@ -514,8 +518,8 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
     farois = []
 
     mapeamentos = [
-        ("Débito", "debito", "debito", "cartao", False),
-        ("Crédito", "credito", "credito", "cartao", False),
+        ("Débito", "debito", "debito", "debito", False),
+        ("Crédito", "credito", "credito", "credito", False),
         ("PIX", "pix", "pix", "pix", False),
         ("Voucher/Vale Refeição", "voucher_vale", "vale_voucher_soma", "voucher", False),
         ("Online/Parceiros (iFood, 99Food etc.)", "online_parceiro", "online", None, True),
@@ -777,7 +781,8 @@ def main():
 
     if len(linhas) == 1:
         info = linhas[0]
-        total_cartao = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_cartao)
+        total_debito = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_debito)
+        total_credito = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_credito)
         total_pix = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_pix)
         total_voucher_pg = somar_janela(transacoes_hoje, 0, 24 * 60, filtro=eh_voucher)
         total_pix_dia_inteiro = total_pix
@@ -789,7 +794,7 @@ def main():
             saipos_geral["dinheiro_detalhe"].extend(turno_dados["dinheiro_detalhe"])
             saipos_geral["cortesia_detalhe"].extend(turno_dados["cortesia_detalhe"])
 
-        pagseguro_por_categoria = {"cartao": total_cartao, "pix": total_pix, "voucher": total_voucher_pg}
+        pagseguro_por_categoria = {"debito": total_debito, "credito": total_credito, "pix": total_pix, "voucher": total_voucher_pg}
 
         html, farois = montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria)
         secoes_html.append(html)
@@ -814,12 +819,13 @@ def main():
         hora_dia = dia_info["hora_fechamento"]
         hora_noite = noite_info["hora_fechamento"]
 
-        total_cartao_dia = total_pix_dia = total_voucher_dia = None
-        total_cartao_noite = total_pix_noite = total_voucher_noite = None
+        total_debito_dia = total_credito_dia = total_pix_dia = total_voucher_dia = None
+        total_debito_noite = total_credito_noite = total_pix_noite = total_voucher_noite = None
 
         if hora_dia:
             m_dia = parse_minutos(hora_dia)
-            total_cartao_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_cartao)
+            total_debito_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_debito)
+            total_credito_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_credito)
             total_pix_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_pix)
             total_voucher_dia = somar_janela(transacoes_hoje, 0, m_dia, filtro=eh_voucher)
 
@@ -828,7 +834,8 @@ def main():
             m_noite = parse_minutos(hora_noite)
             cruzou_meia_noite = m_noite <= m_dia
 
-            total_cartao_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_cartao)
+            total_debito_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_debito)
+            total_credito_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_credito)
             total_pix_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_pix)
             total_voucher_noite = somar_janela(transacoes_hoje, m_dia, 24 * 60, filtro=eh_voucher)
 
@@ -836,7 +843,8 @@ def main():
                 amanha_str = (ontem + timedelta(days=1)).strftime("%Y-%m-%d")
                 print(f"Turno NOITE cruza a meia-noite - buscando tambem {amanha_str}")
                 transacoes_amanha, _ = buscar_transacoes_pagseguro(amanha_str)
-                total_cartao_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_cartao)
+                total_debito_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_debito)
+                total_credito_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_credito)
                 total_pix_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_pix)
                 total_voucher_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_voucher)
 
@@ -845,7 +853,7 @@ def main():
         saipos_dia = saipos_por_turno.get("Dia", _vazio_turno())
         saipos_noite = saipos_por_turno.get("Noite", _vazio_turno())
 
-        html, farois = montar_secao_turno("DIA", dia_info["planilha"], saipos_dia["categorias"], {"cartao": total_cartao_dia, "pix": total_pix_dia, "voucher": total_voucher_dia})
+        html, farois = montar_secao_turno("DIA", dia_info["planilha"], saipos_dia["categorias"], {"debito": total_debito_dia, "credito": total_credito_dia, "pix": total_pix_dia, "voucher": total_voucher_dia})
         secoes_html.append(html)
         farois_gerais.extend(farois)
 
@@ -863,7 +871,7 @@ def main():
         secoes_html.append(html)
         farois_gerais.append(farol)
 
-        html, farois = montar_secao_turno("NOITE", noite_info["planilha"], saipos_noite["categorias"], {"cartao": total_cartao_noite, "pix": total_pix_noite, "voucher": total_voucher_noite})
+        html, farois = montar_secao_turno("NOITE", noite_info["planilha"], saipos_noite["categorias"], {"debito": total_debito_noite, "credito": total_credito_noite, "pix": total_pix_noite, "voucher": total_voucher_noite})
         secoes_html.append(html)
         farois_gerais.extend(farois)
 
