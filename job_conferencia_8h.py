@@ -64,6 +64,7 @@ INTER_CERT_PATH = os.environ.get("INTER_CERT_PATH", "inter_cert.pem")
 INTER_KEY_PATH = os.environ.get("INTER_KEY_PATH", "inter_key.pem")
 
 SAIPOS_TOKEN = os.environ["SAIPOS_TOKEN"]
+print(f"[DEBUG] SAIPOS_TOKEN: tamanho={len(SAIPOS_TOKEN)} inicio='{SAIPOS_TOKEN[:15]}' fim='{SAIPOS_TOKEN[-10:]}'")
 SAIPOS_ID_STORE_OUROPRETO = 71180
 
 CIDADE = "Ouro Preto"
