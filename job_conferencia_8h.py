@@ -109,22 +109,36 @@ def _extrair_hora_fechamento(obs_texto):
 # PAGSEGURO EDI
 # ─────────────────────────────────────────────
 def buscar_transacoes_pagseguro(data_str):
+    """Busca as transacoes do PagSeguro EDI, com ate 5 tentativas e espera
+    progressiva em caso de falha (mesmo padrao ja usado com o Saipos)."""
     url = f"https://edi.api.pagbank.com.br/movement/v3.00/transactional/{data_str}"
     params = {"pageNumber": 1, "pageSize": 1000}
-    resp = requests.get(url, params=params, auth=HTTPBasicAuth(PAGSEGURO_USER, PAGSEGURO_TOKEN))
-    resp.raise_for_status()
 
-    validado = resp.headers.get("VALIDADO", "false").lower() == "true"
-    detalhes = resp.json().get("detalhes", [])
-    transacoes = [
-        (
-            item.get("hora_inicial_transacao", "00:00:00"),
-            float(item.get("valor_total_transacao", 0)),
-            item.get("arranjo_ur", "DESCONHECIDO"),
-        )
-        for item in detalhes
-    ]
-    return transacoes, validado
+    ultimo_erro = None
+    for tentativa in range(5):
+        try:
+            resp = requests.get(url, params=params, auth=HTTPBasicAuth(PAGSEGURO_USER, PAGSEGURO_TOKEN), timeout=60)
+            if resp.status_code == 200:
+                validado = resp.headers.get("VALIDADO", "false").lower() == "true"
+                detalhes = resp.json().get("detalhes", [])
+                transacoes = [
+                    (
+                        item.get("hora_inicial_transacao", "00:00:00"),
+                        float(item.get("valor_total_transacao", 0)),
+                        item.get("arranjo_ur", "DESCONHECIDO"),
+                    )
+                    for item in detalhes
+                ]
+                return transacoes, validado
+            ultimo_erro = f"Status {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            ultimo_erro = str(e)
+
+        espera = 20 * (tentativa + 1)
+        print(f"PagSeguro falhou (tentativa {tentativa + 1}/5): {ultimo_erro} — aguardando {espera}s")
+        time.sleep(espera)
+
+    raise RuntimeError(f"PagSeguro nao respondeu apos 5 tentativas. Ultimo erro: {ultimo_erro}")
 
 
 def eh_debito(arranjo):
@@ -147,6 +161,10 @@ def eh_voucher(arranjo):
 
 
 def somar_janela(transacoes, minuto_inicio, minuto_fim, filtro=None):
+    """Se transacoes for None (PagSeguro indisponivel apos as tentativas),
+    retorna None - para o e-mail mostrar 'N/D', nunca um R$0,00 enganoso."""
+    if transacoes is None:
+        return None
     total = 0.0
     for hora, valor, arranjo in transacoes:
         m = parse_minutos(hora)
@@ -176,22 +194,36 @@ def obter_token_inter():
 
 
 def buscar_pix_recebido_inter(data_str):
-    token = obter_token_inter()
-    url = "https://cdpj.partners.bancointer.com.br/banking/v2/extrato"
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        params={"dataInicio": data_str, "dataFim": data_str},
-        cert=(INTER_CERT_PATH, INTER_KEY_PATH),
-    )
-    resp.raise_for_status()
-    transacoes = resp.json().get("transacoes", [])
+    """Busca o PIX recebido no Banco Inter, com ate 5 tentativas e espera
+    progressiva em caso de falha (mesmo padrao do PagSeguro e Saipos)."""
+    ultimo_erro = None
+    for tentativa in range(5):
+        try:
+            token = obter_token_inter()
+            url = "https://cdpj.partners.bancointer.com.br/banking/v2/extrato"
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"dataInicio": data_str, "dataFim": data_str},
+                cert=(INTER_CERT_PATH, INTER_KEY_PATH),
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                transacoes = resp.json().get("transacoes", [])
+                total_pix = 0.0
+                for t in transacoes:
+                    if t.get("tipoTransacao", "").upper() == "PIX" and t.get("tipoOperacao", "").upper() == "C":
+                        total_pix += float(t.get("valor", 0))
+                return total_pix
+            ultimo_erro = f"Status {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            ultimo_erro = str(e)
 
-    total_pix = 0.0
-    for t in transacoes:
-        if t.get("tipoTransacao", "").upper() == "PIX" and t.get("tipoOperacao", "").upper() == "C":
-            total_pix += float(t.get("valor", 0))
-    return total_pix
+        espera = 20 * (tentativa + 1)
+        print(f"Banco Inter falhou (tentativa {tentativa + 1}/5): {ultimo_erro} — aguardando {espera}s")
+        time.sleep(espera)
+
+    raise RuntimeError(f"Banco Inter nao respondeu apos 5 tentativas. Ultimo erro: {ultimo_erro}")
 
 
 def _extrair_pix_direto_declarado(obs_texto):
@@ -209,6 +241,65 @@ def _extrair_pix_direto_declarado(obs_texto):
         valor = 0.0
     motivo = m.group(2).strip()
     return valor, motivo
+
+
+def buscar_fotos_do_dia(token, site_id, data_str):
+    """Busca os JSONs brutos salvos no Teams (pasta Recebimentos) para a
+    data informada, e extrai as fotos (papel do Saipos + maquinas) de
+    cada fechamento enviado naquele dia, prontas para anexar no e-mail."""
+    ano, mes, _ = data_str.split("-")
+    caminho = f"{ano}/{mes}/Recebimentos"
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{caminho}:/children"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        print(f"Nao encontrei a pasta de Recebimentos para {data_str}: {resp.status_code}")
+        return []
+    arquivos = resp.json().get("value", [])
+
+    anexos = []
+    for item in arquivos:
+        nome = item.get("name", "")
+        if not (nome.startswith(f"fechamento-{data_str}") and nome.endswith(".json")):
+            continue
+
+        download_url = item.get("@microsoft.graph.downloadUrl")
+        if not download_url:
+            continue
+        r2 = requests.get(download_url)
+        if r2.status_code != 200:
+            continue
+        payload = r2.json()
+
+        protocolo = payload.get("protocolo", nome.replace(".json", ""))
+        hora = payload.get("hora_fechamento", "")
+        sufixo = f"{protocolo}" + (f"-{hora.replace(':', 'h')}" if hora else "")
+
+        anexo_saipos = _montar_anexo_foto(f"saipos-{sufixo}.jpg", payload.get("foto_saipos_base64"))
+        anexo_maquina = _montar_anexo_foto(f"maquinas-{sufixo}.jpg", payload.get("foto_maquina_base64"))
+        if anexo_saipos:
+            anexos.append(anexo_saipos)
+        if anexo_maquina:
+            anexos.append(anexo_maquina)
+
+    return anexos
+
+
+def _montar_anexo_foto(nome_arquivo, data_uri):
+    """Converte uma data URI ('data:image/jpeg;base64,...') em um anexo
+    no formato que a Graph API espera para sendMail."""
+    if not data_uri or "," not in data_uri:
+        return None
+    cabecalho, base64_puro = data_uri.split(",", 1)
+    content_type = "image/jpeg"
+    if "image/png" in cabecalho:
+        content_type = "image/png"
+    return {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": nome_arquivo,
+        "contentType": content_type,
+        "contentBytes": base64_puro,
+    }
 
 
 def checar_excecao_pix_inter(data_str, total_pix_pagseguro, observacoes_turnos=None):
@@ -842,7 +933,7 @@ def calcular_farol_geral(farois):
     return "cinza"
 
 
-def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None, modo_teste=False):
+def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None, modo_teste=False, anexos=None):
     ano_f, mes_f, dia_f = data_str.split("-")
     data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
 
@@ -879,16 +970,19 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
             if valor_declarado > 0:
                 aviso_declarado = f" (o gerente declarou R$ {valor_declarado:.2f}, mas o valor não bate com o detectado — confira)"
             secao_excecao = f"""
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #E74C3C;background:#FDEBEA;border-radius:6px;margin-top:16px;">
-              <tr><td style="padding:14px 16px;font-size:13px;color:#8a1f1f;">
-                <b style="font-size:14px;">🚨 SUSPEITA DE PIX NÃO EXPLICADO — POSSÍVEL FRAUDE</b><br><br>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #E67E22;background:#FDF3E7;border-radius:6px;margin-top:16px;">
+              <tr><td style="padding:14px 16px;font-size:13px;color:#7a4a12;">
+                <b style="font-size:14px;">⚠️ PIX recebido no Banco Inter sem explicação no fechamento</b><br><br>
                 O Banco Inter recebeu <b>R$ {diferenca:.2f}</b> a mais em PIX do que o registrado no
                 PagSeguro (Inter R$ {total_inter:.2f} x PagSeguro R$ {total_pagseguro:.2f}), e o gerente
                 <b>não declarou</b> esse recebimento no fechamento{aviso_declarado}.
                 <br><br>
-                <b>Ação recomendada:</b> verificar com o gerente da loja de onde veio esse valor antes
-                de considerar normal. Se for legítimo, oriente o gerente a sempre declarar PIX direto
-                no campo específico do formulário nos próximos fechamentos.
+                <b>Causa mais provável:</b> uso da maquininha <b>InterPag</b> (que não é integrada ao sistema
+                e deveria ser usada só em emergências). Também pode ser PIX direto de um cliente.
+                <br><br>
+                <b>Ação recomendada:</b> confirmar com o gerente da loja qual foi o motivo, e reforçar que
+                o fechamento deve informar sempre que a InterPag ou PIX direto forem usados, no campo
+                específico do formulário.
               </td></tr>
             </table>
             """
@@ -938,6 +1032,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
             "subject": f"{'[TESTE] ' if modo_teste else ''}{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
+            "attachments": anexos or [],
         }
     }
     resp = requests.post(url, headers=headers, json=body)
@@ -965,11 +1060,30 @@ def main():
     print(f"Turnos encontrados na planilha: {len(linhas)}")
 
     if not linhas:
-        print("Nenhuma linha encontrada para esse dia na planilha. Encerrando.")
+        print("Nenhuma linha encontrada para esse dia na planilha - conciliacao incompleta.")
+        print("Mesmo assim, tentando enviar as fotos do dia (independente da conciliacao).")
+        try:
+            anexos_fotos = buscar_fotos_do_dia(token, site_id, data_str)
+        except Exception as e:
+            print(f"Falha ao buscar fotos do dia: {e}")
+            anexos_fotos = []
+
+        secoes_html = ["""
+        <p style="color:#c00;font-size:13px;">
+          ⚠️ A linha desse dia ainda não foi encontrada na planilha Dashboard —
+          não foi possível fazer a conciliação completa (Débito/Crédito/PIX/Saipos).
+          As fotos anexadas abaixo são do fechamento enviado pela loja, para conferência manual.
+        </p>
+        """]
+        enviar_email_conciliacao(token, data_str, secoes_html, ["cinza"], None, modo_teste=modo_teste_flag, anexos=anexos_fotos)
         return
 
-    transacoes_hoje, validado_hoje = buscar_transacoes_pagseguro(data_str)
-    print(f"Transacoes PagSeguro em {data_str}: {len(transacoes_hoje)} - validado={validado_hoje}")
+    try:
+        transacoes_hoje, validado_hoje = buscar_transacoes_pagseguro(data_str)
+    except Exception as e:
+        print(f"PagSeguro indisponivel apos todas as tentativas: {e}")
+        transacoes_hoje, validado_hoje = None, False
+    print(f"Transacoes PagSeguro em {data_str}: {len(transacoes_hoje) if transacoes_hoje is not None else 'INDISPONIVEL'} - validado={validado_hoje}")
 
     try:
         saipos_por_turno = montar_dados_saipos_por_turno(data_str)
@@ -1051,11 +1165,23 @@ def main():
             if cruzou_meia_noite:
                 amanha_str = (ontem + timedelta(days=1)).strftime("%Y-%m-%d")
                 print(f"Turno NOITE cruza a meia-noite - buscando tambem {amanha_str}")
-                transacoes_amanha, _ = buscar_transacoes_pagseguro(amanha_str)
-                total_debito_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_debito)
-                total_credito_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_credito)
-                total_pix_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_pix)
-                total_voucher_noite += somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_voucher)
+                try:
+                    transacoes_amanha, _ = buscar_transacoes_pagseguro(amanha_str)
+                except Exception as e:
+                    print(f"PagSeguro (dia seguinte) indisponivel apos todas as tentativas: {e}")
+                    transacoes_amanha = None
+
+                extra_debito = somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_debito)
+                extra_credito = somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_credito)
+                extra_pix = somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_pix)
+                extra_voucher = somar_janela(transacoes_amanha, 0, m_noite, filtro=eh_voucher)
+
+                # Se qualquer um dos dois lados for None (falha), o total vira None
+                # (N/D) - nao da pra "somar zero escondido" com um valor real.
+                total_debito_noite = None if (total_debito_noite is None or extra_debito is None) else total_debito_noite + extra_debito
+                total_credito_noite = None if (total_credito_noite is None or extra_credito is None) else total_credito_noite + extra_credito
+                total_pix_noite = None if (total_pix_noite is None or extra_pix is None) else total_pix_noite + extra_pix
+                total_voucher_noite = None if (total_voucher_noite is None or extra_voucher is None) else total_voucher_noite + extra_voucher
 
         total_pix_dia_inteiro = (total_pix_dia or 0) + (total_pix_noite or 0)
 
@@ -1101,7 +1227,24 @@ def main():
         observacoes_do_dia = [dia_info.get("observacao", ""), noite_info.get("observacao", "")]
 
     excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro, observacoes_do_dia)
-    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=modo_teste_flag)
+
+    # O farol GERAL so pode fechar "tudo OK" se a excecao do Inter (quando
+    # existe) ja estiver explicada. Se o Banco Inter recebeu PIX que nao
+    # bate com o PagSeguro e o gerente NAO declarou o motivo, isso conta
+    # como pendencia - o farol geral nao fecha verde ate isso ser resolvido.
+    if excecao:
+        _, _, _, gerente_avisou_e_bate, _, _ = excecao
+        if not gerente_avisou_e_bate:
+            farois_gerais.append("amarelo")
+
+    try:
+        anexos_fotos = buscar_fotos_do_dia(token, site_id, data_str)
+        print(f"Fotos encontradas para anexar: {len(anexos_fotos)}")
+    except Exception as e:
+        print(f"Falha ao buscar fotos do dia: {e}")
+        anexos_fotos = []
+
+    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=modo_teste_flag, anexos=anexos_fotos)
     print("E-mail unico enviado com sucesso.")
 
 
