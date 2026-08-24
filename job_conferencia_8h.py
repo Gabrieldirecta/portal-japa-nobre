@@ -215,8 +215,17 @@ def checar_excecao_pix_inter(data_str, total_pix_pagseguro):
 # ─────────────────────────────────────────────
 def categorizar_pagamento_saipos(desc):
     """Classifica o texto livre do Saipos (desc_store_payment_type) em
-    uma das categorias que usamos na conciliacao."""
+    uma das categorias que usamos na conciliacao.
+
+    IMPORTANTE: checa "ifood"/"99food" ANTES de checar "pix", porque o
+    Saipos registra pagamentos feitos via PIX DENTRO do app do iFood
+    como "Pix - iFood Pago" — esse dinheiro nao cai direto na nossa
+    conta/maquininha, fica retido com o parceiro e eh repassado junto
+    com o resto do "Online/Parceiros". So o PIX pago diretamente pelo
+    cliente (presencial/balcao) deve contar como "pix" de verdade."""
     d = (desc or "").lower()
+    if "ifood" in d or "99food" in d or "99 food" in d:
+        return "online_parceiro"
     if "dinheiro" in d:
         return "dinheiro"
     if "cortesia" in d:
