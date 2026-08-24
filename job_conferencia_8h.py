@@ -194,7 +194,28 @@ def buscar_pix_recebido_inter(data_str):
     return total_pix
 
 
-def checar_excecao_pix_inter(data_str, total_pix_pagseguro):
+def _extrair_pix_direto_declarado(obs_texto):
+    """Extrai a declaração de PIX direto que o gerente registrou no
+    formulário (formato 'PIXDIRETO:valor:motivo' dentro da Observação).
+    Retorna (valor, motivo) ou (0.0, None) se não houver declaração."""
+    if not obs_texto:
+        return 0.0, None
+    m = re.search(r"PIXDIRETO:([\d.]+):([^—]*)", obs_texto)
+    if not m:
+        return 0.0, None
+    try:
+        valor = float(m.group(1))
+    except ValueError:
+        valor = 0.0
+    motivo = m.group(2).strip()
+    return valor, motivo
+
+
+def checar_excecao_pix_inter(data_str, total_pix_pagseguro, observacoes_turnos=None):
+    """Verifica se o Inter recebeu mais PIX do que o PagSeguro processou.
+    Se o gerente ja declarou esse PIX direto no formulario (com valor
+    batendo), trata como AVISO informativo. Se nao declarou (ou o valor
+    nao bate), trata como SUSPEITA DE FRAUDE - alerta mais forte."""
     try:
         total_pix_inter = buscar_pix_recebido_inter(data_str)
     except Exception as e:
@@ -204,10 +225,23 @@ def checar_excecao_pix_inter(data_str, total_pix_pagseguro):
     diferenca = total_pix_inter - total_pix_pagseguro
     print(f"Checagem de excecao - Inter: R$ {total_pix_inter:.2f} | PagSeguro: R$ {total_pix_pagseguro:.2f}")
 
-    if diferenca > 5:
-        print(f"Possivel PIX direto no CNPJ detectado: R$ {diferenca:.2f}")
-        return (total_pix_inter, total_pix_pagseguro, diferenca)
-    return None
+    if diferenca <= 5:
+        return None
+
+    # Soma tudo que o(s) gerente(s) declararam nos turnos do dia
+    valor_declarado_total = 0.0
+    motivos_declarados = []
+    for obs in (observacoes_turnos or []):
+        valor, motivo = _extrair_pix_direto_declarado(obs)
+        if valor > 0:
+            valor_declarado_total += valor
+            if motivo:
+                motivos_declarados.append(motivo)
+
+    gerente_avisou_e_bate = abs(valor_declarado_total - diferenca) <= 5
+
+    print(f"Possivel PIX direto no CNPJ detectado: R$ {diferenca:.2f} | Declarado pelo gerente: R$ {valor_declarado_total:.2f}")
+    return (total_pix_inter, total_pix_pagseguro, diferenca, gerente_avisou_e_bate, valor_declarado_total, motivos_declarados)
 
 
 # ─────────────────────────────────────────────
@@ -294,6 +328,9 @@ def montar_dados_saipos_por_turno(data_str):
     - categorias: {categoria: valor_total}
     - dinheiro_detalhe: lista de {pedido, hora, valor} das vendas em dinheiro
     - cortesia_detalhe: lista de {pedido, hora, valor} das vendas em cortesia
+    - pix_ifood_total: quanto do total "online_parceiro" veio de PIX pago
+      dentro do app do iFood (so para exibir uma nota explicativa, ja que
+      esse valor conta como "online_parceiro", nao como "pix")
     """
     vendas = buscar_vendas_saipos(data_str)
 
@@ -301,7 +338,7 @@ def montar_dados_saipos_por_turno(data_str):
     for v in vendas:
         turno = (v.get("store_shift") or {}).get("desc_store_shift", "Desconhecido")
         if turno not in dados:
-            dados[turno] = {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": []}
+            dados[turno] = {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": [], "pix_ifood_total": 0.0}
 
         for p in (v.get("payments") or []):
             desc = p.get("desc_store_payment_type", "")
@@ -309,6 +346,10 @@ def montar_dados_saipos_por_turno(data_str):
             categoria = categorizar_pagamento_saipos(desc)
 
             dados[turno]["categorias"][categoria] = dados[turno]["categorias"].get(categoria, 0.0) + valor
+
+            desc_lower = desc.lower()
+            if "pix" in desc_lower and ("ifood" in desc_lower or "99food" in desc_lower or "99 food" in desc_lower):
+                dados[turno]["pix_ifood_total"] += valor
 
             item_detalhe = {
                 "pedido": v.get("sale_number") or v.get("id_sale"),
@@ -479,24 +520,34 @@ CORES_FAROL = {
 }
 
 
-def _linha_tabela(fonte, saipos_val, planilha_val, pagseguro_val=None, informativo=False):
+def _linha_tabela(fonte, saipos_val, planilha_val, pagseguro_val=None, informativo=False, saipos_val_consolidado=None):
     """Monta uma linha <tr> da tabela principal. pagseguro_val=None significa
     'nao aplicavel' (mostra traco). Se informativo=True, a linha nao entra no
     calculo do farol (ex: Online/Parceiros, que a loja sempre lanca como 0
     porque nao tem acesso a esse valor - quem preenche depois e o escritorio).
+
+    saipos_val_consolidado: se informado, usa ESSE valor (nao o saipos_val
+    exibido na coluna) para calcular status/diferenca. Serve para casos
+    como PIX, onde parte do valor esta "escondida" em outra categoria
+    (ex: PIX pago via iFood conta como Online) - o que importa para o
+    farol e' se o TOTAL consolidado bate, mesmo que a divisao por
+    categoria não bata exatamente.
+
     Retorna (html, farol_ou_none)."""
+    valor_para_calculo = saipos_val_consolidado if saipos_val_consolidado is not None else saipos_val
+
     if informativo:
         cor_fundo, cor_texto = CORES_FAROL["cinza"]
         status = "Preenchido auto."
         diferenca_txt = "—"
         farol = None
-    elif saipos_val is None or planilha_val is None:
+    elif valor_para_calculo is None or planilha_val is None:
         cor_fundo, cor_texto = CORES_FAROL["cinza"]
         status = "N/D"
         diferenca_txt = "—"
         farol = None
     else:
-        diferenca = saipos_val - planilha_val
+        diferenca = valor_para_calculo - planilha_val
         farol, status = _classificar_farol(diferenca)
         cor_fundo, cor_texto = CORES_FAROL[farol]
         diferenca_txt = f"R$ {diferenca:.2f}"
@@ -518,13 +569,59 @@ def _linha_tabela(fonte, saipos_val, planilha_val, pagseguro_val=None, informati
     return html, farol
 
 
-def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_categoria):
+def _detectar_trocas_categoria(deltas):
+    """Procura pares de categorias cujas diferencas se cancelam (uma sobrou,
+    outra faltou, valores parecidos) - sinal de que o gerente lancou o
+    valor na categoria errada. Retorna (lista_de_notas, nomes_ja_explicados)."""
+    notas = []
+    explicados = set()
+    nomes = list(deltas.keys())
+
+    for i in range(len(nomes)):
+        for j in range(i + 1, len(nomes)):
+            nome_a, nome_b = nomes[i], nomes[j]
+            if nome_a in explicados or nome_b in explicados:
+                continue
+            delta_a = deltas[nome_a]["delta"]
+            delta_b = deltas[nome_b]["delta"]
+            # Uma sobrou (positivo) e a outra faltou (negativo), em valores parecidos
+            if delta_a * delta_b < 0 and abs(delta_a + delta_b) <= 5:
+                info_a = deltas[nome_a]
+                info_b = deltas[nome_b]
+                quem_faltou = nome_a if delta_a < 0 else nome_b
+                quem_sobrou = nome_b if delta_a < 0 else nome_a
+                valor_movido = abs(delta_a)
+                info_falta = deltas[quem_faltou]
+                info_sobra = deltas[quem_sobrou]
+                notas.append(
+                    f"<li>O gerente bateu R$ {info_falta['loja']:.2f} no <b>{quem_faltou}</b>, mas o Saipos indica "
+                    f"R$ {info_falta['saipos']:.2f} vendido (faltou R$ {valor_movido:.2f}). Ao mesmo tempo, o "
+                    f"<b>{quem_sobrou}</b> teve R$ {valor_movido:.2f} a mais do que o Saipos indicava "
+                    f"(Loja R$ {info_sobra['loja']:.2f} vs Saipos R$ {info_sobra['saipos']:.2f}). "
+                    f"Isso sugere que esse valor foi lançado na categoria errada — o consolidado do dia bateu, "
+                    f"mas vale alinhar com o gerente para não repetir.</li>"
+                )
+                explicados.add(nome_a)
+                explicados.add(nome_b)
+
+    return notas, explicados
+
+
+def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_categoria, pix_ifood_total=0.0):
     """Monta as linhas da tabela principal para um turno (exclui Dinheiro e
     Cortesia, que tem secao propria com relatorio detalhado).
-    Retorna (html, lista_de_farois) - farois so das linhas que contam
-    para o farol geral (Online/Parceiros fica de fora, por ser informativo)."""
+
+    O farol GERAL desta secao (usado no farol do e-mail) e' baseado no
+    CONSOLIDADO (soma de todas as categorias) - se o total do turno bate,
+    o farol fica verde mesmo que categorias individuais estejam diferentes
+    entre si (ex: sobrou no Debito, faltou no Credito). Cada linha da
+    tabela continua mostrando a comparacao real por categoria, para
+    transparencia, mas isso e' informativo - o que decide o farol e' o
+    total consolidado.
+
+    Retorna (html, lista_de_farois) - normalmente 1 farol (o do total
+    consolidado do turno)."""
     linhas_html = []
-    farois = []
 
     mapeamentos = [
         ("Débito", "debito", "debito", "debito", False),
@@ -533,6 +630,8 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
         ("Voucher/Vale Refeição", "voucher_vale", "vale_voucher_soma", "voucher", False),
         ("Online/Parceiros (iFood, 99Food etc.)", "online_parceiro", "online", None, True),
     ]
+
+    deltas = {}  # nome -> {"loja": x, "saipos": y, "delta": saipos-loja} - so categorias que contam no consolidado
 
     for fonte_label, cat_saipos, cat_planilha, cat_pagseguro, informativo in mapeamentos:
         saipos_val = saipos_categorias.get(cat_saipos, 0.0)
@@ -544,10 +643,74 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
 
         pagseguro_val = pagseguro_por_categoria.get(cat_pagseguro) if cat_pagseguro else None
 
-        html, farol = _linha_tabela(fonte_label, saipos_val, planilha_val, pagseguro_val, informativo=informativo)
+        # PIX usa o valor consolidado (direto + iFood) so para exibicao do
+        # status individual da linha - mas o que decide o farol GERAL e'
+        # sempre o total do turno (calculado abaixo), entao aqui only
+        # mostra a linha corretamente.
+        saipos_val_para_linha = saipos_val
+        if fonte_label == "PIX" and pix_ifood_total > 0:
+            saipos_val_para_linha = saipos_val + pix_ifood_total
+
+        html, _ = _linha_tabela(fonte_label, saipos_val, planilha_val, pagseguro_val, informativo=informativo, saipos_val_consolidado=(saipos_val_para_linha if fonte_label == "PIX" else None))
         linhas_html.append(html)
-        if farol:
-            farois.append(farol)
+
+        if not informativo:
+            deltas[fonte_label] = {
+                "loja": planilha_val,
+                "saipos": saipos_val_para_linha,
+                "delta": saipos_val_para_linha - planilha_val,
+            }
+
+        # Nota explicativa logo abaixo da linha de PIX, se houver PIX pago
+        # dentro do app do iFood (esse valor conta em "Online", nao aqui).
+        if fonte_label == "PIX" and pix_ifood_total > 0:
+            pix_direto = saipos_val
+            soma_total = pix_direto + pix_ifood_total
+            linhas_html.append(f"""
+            <tr>
+              <td colspan="6" style="padding:6px 10px;border:1px solid #ddd;background:#FAFAFA;font-size:11px;color:#777;">
+                📌 Nota: R$ {pix_ifood_total:.2f} desse PIX foi pago <b>dentro do app do iFood</b>
+                (já contabilizado na linha "Online/Parceiros" abaixo, não cai direto na conta).
+                O status acima já considera o total consolidado
+                (PIX direto R$ {pix_direto:.2f} + PIX via iFood R$ {pix_ifood_total:.2f} = R$ {soma_total:.2f}).
+              </td>
+            </tr>
+            """)
+
+    # ── Calcula o CONSOLIDADO do turno (soma de todas as categorias que contam) ──
+    total_loja = sum(d["loja"] for d in deltas.values())
+    total_saipos = sum(d["saipos"] for d in deltas.values())
+    diferenca_total = total_saipos - total_loja
+    farol_geral, status_geral = _classificar_farol(diferenca_total)
+
+    # ── Detecta trocas de categoria (sobrou em uma, faltou em outra) ──
+    notas_trocas, categorias_explicadas = _detectar_trocas_categoria(deltas)
+
+    # ── Notas para diferencas que sobraram sem explicacao automatica ──
+    notas_pendentes = []
+    for nome, info in deltas.items():
+        if nome in categorias_explicadas:
+            continue
+        if nome == "PIX" and pix_ifood_total > 0:
+            continue  # ja explicado na nota do PIX-iFood acima
+        if abs(info["delta"]) > 5:
+            sinal = "a mais" if info["delta"] > 0 else "a menos"
+            notas_pendentes.append(
+                f"<li><b>{nome}</b> teve uma diferença de R$ {abs(info['delta']):.2f} ({sinal}) que não "
+                f"foi automaticamente explicada — vale conferir com o gerente o motivo específico.</li>"
+            )
+
+    todas_notas = notas_trocas + notas_pendentes
+    bloco_notas = ""
+    if todas_notas:
+        bloco_notas = f"""
+        <div style="margin-top:8px;padding:10px 14px;background:#FFF9E6;border-left:3px solid #E8C547;border-radius:4px;font-size:12px;color:#555;">
+          <b>🔍 Observações para o conferente:</b>
+          <ul style="margin:6px 0 0;padding-left:18px;">
+            {"".join(todas_notas)}
+          </ul>
+        </div>
+        """
 
     nota_online = """
     <p style="font-size:11px;color:#999;margin:4px 0 0;">
@@ -555,6 +718,16 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
       O valor mostrado na coluna Saipos acima já foi preenchido automaticamente na planilha
       Dashboard pelo sistema. Essa linha não entra no status/farol do fechamento.
     </p>
+    """
+
+    resumo_consolidado = f"""
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px;">
+      <tr>
+        <td style="background:{CORES_FAROL[farol_geral][0]};border-radius:6px;padding:8px 12px;font-size:12px;color:{CORES_FAROL[farol_geral][1]};font-weight:700;">
+          Consolidado do turno: Loja R$ {total_loja:.2f} | Saipos R$ {total_saipos:.2f} | Diferença R$ {diferenca_total:.2f} — {status_geral}
+        </td>
+      </tr>
+    </table>
     """
 
     tabela = f"""
@@ -570,9 +743,11 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
       </tr>
       {"".join(linhas_html)}
     </table>
+    {resumo_consolidado}
     {nota_online}
+    {bloco_notas}
     """
-    return tabela, farois
+    return tabela, [farol_geral]
 
 
 def _montar_secao_com_detalhe(titulo, turno_label, planilha_val, saipos_val, detalhe, mostrar_deposito=False):
@@ -685,17 +860,38 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
 
     secao_excecao = ""
     if excecao_pix:
-        total_inter, total_pagseguro, diferenca = excecao_pix
-        secao_excecao = f"""
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #F5D9A8;background:#FFF9E6;border-radius:6px;margin-top:16px;">
-          <tr><td style="padding:12px 14px;font-size:12px;color:#666;">
-            <b style="color:#8a6d1e;">Possível PIX direto no CNPJ:</b> o Banco Inter recebeu
-            R$ {diferenca:.2f} a mais em PIX do que o registrado no PagSeguro
-            (Inter R$ {total_inter:.2f} x PagSeguro R$ {total_pagseguro:.2f}).
-            Confira e some manualmente ao fechamento, se confirmado.
-          </td></tr>
-        </table>
-        """
+        total_inter, total_pagseguro, diferenca, gerente_avisou_e_bate, valor_declarado, motivos = excecao_pix
+
+        if gerente_avisou_e_bate:
+            motivos_txt = "; ".join(motivos) if motivos else "não informado"
+            secao_excecao = f"""
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #B8E0C8;background:#EAF7EF;border-radius:6px;margin-top:16px;">
+              <tr><td style="padding:12px 14px;font-size:12px;color:#666;">
+                <b style="color:#1e7a45;">✅ PIX direto no CNPJ — já informado pelo gerente:</b>
+                R$ {diferenca:.2f} recebidos direto na conta, conforme declarado no fechamento
+                (motivo: {motivos_txt}). Valor bate com o detectado no Banco Inter — sem necessidade
+                de ação adicional.
+              </td></tr>
+            </table>
+            """
+        else:
+            aviso_declarado = ""
+            if valor_declarado > 0:
+                aviso_declarado = f" (o gerente declarou R$ {valor_declarado:.2f}, mas o valor não bate com o detectado — confira)"
+            secao_excecao = f"""
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #E74C3C;background:#FDEBEA;border-radius:6px;margin-top:16px;">
+              <tr><td style="padding:14px 16px;font-size:13px;color:#8a1f1f;">
+                <b style="font-size:14px;">🚨 SUSPEITA DE PIX NÃO EXPLICADO — POSSÍVEL FRAUDE</b><br><br>
+                O Banco Inter recebeu <b>R$ {diferenca:.2f}</b> a mais em PIX do que o registrado no
+                PagSeguro (Inter R$ {total_inter:.2f} x PagSeguro R$ {total_pagseguro:.2f}), e o gerente
+                <b>não declarou</b> esse recebimento no fechamento{aviso_declarado}.
+                <br><br>
+                <b>Ação recomendada:</b> verificar com o gerente da loja de onde veio esse valor antes
+                de considerar normal. Se for legítimo, oriente o gerente a sempre declarar PIX direto
+                no campo específico do formulário nos próximos fechamentos.
+              </td></tr>
+            </table>
+            """
 
     corpo_html = f"""
     <html><body style="margin:0;padding:0;background:#f2f2f2;font-family:'Segoe UI',Arial,sans-serif;">
@@ -753,6 +949,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
 # ─────────────────────────────────────────────
 def main():
     data_override = os.environ.get("DATA_ALVO", "").strip()
+    modo_teste_flag = os.environ.get("MODO_TESTE", "true").strip().lower() == "true"
     if data_override:
         ontem = datetime.strptime(data_override, "%Y-%m-%d").date()
         print(f"Usando data manual (DATA_ALVO): {ontem}")
@@ -786,7 +983,7 @@ def main():
     total_pix_dia_inteiro = 0.0
 
     def _vazio_turno():
-        return {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": []}
+        return {"categorias": {}, "dinheiro_detalhe": [], "cortesia_detalhe": [], "pix_ifood_total": 0.0}
 
     if len(linhas) == 1:
         info = linhas[0]
@@ -802,10 +999,11 @@ def main():
                 saipos_geral["categorias"][cat] = saipos_geral["categorias"].get(cat, 0.0) + val
             saipos_geral["dinheiro_detalhe"].extend(turno_dados["dinheiro_detalhe"])
             saipos_geral["cortesia_detalhe"].extend(turno_dados["cortesia_detalhe"])
+            saipos_geral["pix_ifood_total"] += turno_dados.get("pix_ifood_total", 0.0)
 
         pagseguro_por_categoria = {"debito": total_debito, "credito": total_credito, "pix": total_pix, "voucher": total_voucher_pg}
 
-        html, farois = montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria)
+        html, farois = montar_secao_turno(None, info["planilha"], saipos_geral["categorias"], pagseguro_por_categoria, saipos_geral["pix_ifood_total"])
         secoes_html.append(html)
         farois_gerais.extend(farois)
 
@@ -822,6 +1020,8 @@ def main():
         html, farol = montar_secao_cortesia(None, info["planilha"].get("cortesia", 0.0), saipos_geral["categorias"].get("cortesia", 0.0), saipos_geral["cortesia_detalhe"])
         secoes_html.append(html)
         farois_gerais.append(farol)
+
+        observacoes_do_dia = [info.get("observacao", "")]
 
     else:
         dia_info, noite_info = linhas[0], linhas[1]
@@ -862,7 +1062,7 @@ def main():
         saipos_dia = saipos_por_turno.get("Dia", _vazio_turno())
         saipos_noite = saipos_por_turno.get("Noite", _vazio_turno())
 
-        html, farois = montar_secao_turno("DIA", dia_info["planilha"], saipos_dia["categorias"], {"debito": total_debito_dia, "credito": total_credito_dia, "pix": total_pix_dia, "voucher": total_voucher_dia})
+        html, farois = montar_secao_turno("DIA", dia_info["planilha"], saipos_dia["categorias"], {"debito": total_debito_dia, "credito": total_credito_dia, "pix": total_pix_dia, "voucher": total_voucher_dia}, saipos_dia.get("pix_ifood_total", 0.0))
         secoes_html.append(html)
         farois_gerais.extend(farois)
 
@@ -880,7 +1080,7 @@ def main():
         secoes_html.append(html)
         farois_gerais.append(farol)
 
-        html, farois = montar_secao_turno("NOITE", noite_info["planilha"], saipos_noite["categorias"], {"debito": total_debito_noite, "credito": total_credito_noite, "pix": total_pix_noite, "voucher": total_voucher_noite})
+        html, farois = montar_secao_turno("NOITE", noite_info["planilha"], saipos_noite["categorias"], {"debito": total_debito_noite, "credito": total_credito_noite, "pix": total_pix_noite, "voucher": total_voucher_noite}, saipos_noite.get("pix_ifood_total", 0.0))
         secoes_html.append(html)
         farois_gerais.extend(farois)
 
@@ -898,8 +1098,10 @@ def main():
         secoes_html.append(html)
         farois_gerais.append(farol)
 
-    excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro)
-    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=bool(data_override))
+        observacoes_do_dia = [dia_info.get("observacao", ""), noite_info.get("observacao", "")]
+
+    excecao = checar_excecao_pix_inter(data_str, total_pix_dia_inteiro, observacoes_do_dia)
+    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=modo_teste_flag)
     print("E-mail unico enviado com sucesso.")
 
 

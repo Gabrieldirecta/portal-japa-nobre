@@ -258,6 +258,31 @@
     </div>
 
     <div class="card">
+      <div class="card-title">⚠️ PIX Direto no CNPJ (fora da maquininha/Saipos)</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        Algum cliente pagou via PIX direto pra conta da empresa hoje (não pela maquininha)?
+        Se sim, declare aqui — isso evita que o sistema marque como suspeita de fraude.
+      </p>
+      <div class="form-group">
+        <label>Recebeu PIX direto no CNPJ hoje?</label>
+        <select id="pix_direto_teve" onchange="document.getElementById('bloco_pix_direto').style.display = this.value === 'sim' ? 'block' : 'none';">
+          <option value="nao">Não</option>
+          <option value="sim">Sim</option>
+        </select>
+      </div>
+      <div id="bloco_pix_direto" style="display:none;">
+        <div class="form-group">
+          <label>Valor total recebido (R$)</label>
+          <input type="number" id="pix_direto_valor" placeholder="0,00" min="0" step="0.01">
+        </div>
+        <div class="form-group">
+          <label>Motivo / cliente</label>
+          <input type="text" id="pix_direto_motivo" placeholder="Ex: cliente João pagou adiantado por evento">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title">📸 Foto — Papel do Fechamento Saipos <span class="req">*</span></div>
       <label class="photo-zone" id="zone_saipos">
         <input type="file" accept="image/*" capture="environment" onchange="prevFoto(this,'prev_saipos','zone_saipos','req_saipos')">
@@ -537,6 +562,9 @@ async function enviar() {
     total_saipos,
     diferenca,
     obs_caixa: document.getElementById('obs_caixa').value,
+    pix_direto_teve: document.getElementById('pix_direto_teve').value,
+    pix_direto_valor: getN('pix_direto_valor'),
+    pix_direto_motivo: document.getElementById('pix_direto_motivo').value,
     // Semáforo
     semaforo: abs(diferenca) <= 1 ? 'verde' : abs(diferenca) <= 5 ? 'amarelo' : 'vermelho',
     // Fotos (já comprimidas, prontas para anexar ao e-mail)
