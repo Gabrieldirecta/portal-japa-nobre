@@ -772,24 +772,47 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
     total_loja = sum(d["loja"] for d in deltas.values())
     total_saipos = sum(d["saipos"] for d in deltas.values())
     diferenca_total = total_saipos - total_loja
-    farol_geral, status_geral = _classificar_farol(diferenca_total)
+
+    # ── Loja parece nao ter enviado o fechamento ainda (tudo zerado, mas
+    # o Saipos mostra movimento real) - isso NAO e' um erro de conferencia,
+    # e' so falta de dado. Tratar diferente de uma divergencia de verdade.
+    fechamento_nao_enviado = total_loja == 0 and total_saipos > 5
+
+    if fechamento_nao_enviado:
+        farol_geral, status_geral = "cinza", "Dados não preenchidos"
+        aviso_nao_enviado = f"""
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #999;background:#F0F0F0;border-radius:6px;margin-bottom:10px;">
+          <tr><td style="padding:12px 14px;font-size:13px;color:#444;">
+            <b>⚪ A LOJA NÃO PREENCHEU OS DADOS deste turno.</b><br>
+            O Saipos já mostra R$ {total_saipos:.2f} em vendas, mas o formulário de fechamento
+            não foi preenchido — por isso os valores abaixo NÃO representam uma comparação real,
+            e as diferenças por categoria não são erros de caixa. Assim que a loja preencher o
+            fechamento, rode a conciliação de novo para ver os valores reais comparados.
+          </td></tr>
+        </table>
+        """
+    else:
+        farol_geral, status_geral = _classificar_farol(diferenca_total)
+        aviso_nao_enviado = ""
 
     # ── Detecta trocas de categoria (sobrou em uma, faltou em outra) ──
     notas_trocas, categorias_explicadas = _detectar_trocas_categoria(deltas)
 
     # ── Notas para diferencas que sobraram sem explicacao automatica ──
+    # (nao gera essas notas se o motivo ja e' "fechamento nao enviado")
     notas_pendentes = []
-    for nome, info in deltas.items():
-        if nome in categorias_explicadas:
-            continue
-        if nome == "PIX" and pix_ifood_total > 0:
-            continue  # ja explicado na nota do PIX-iFood acima
-        if abs(info["delta"]) > 5:
-            sinal = "a mais" if info["delta"] > 0 else "a menos"
-            notas_pendentes.append(
-                f"<li><b>{nome}</b> teve uma diferença de R$ {abs(info['delta']):.2f} ({sinal}) que não "
-                f"foi automaticamente explicada — vale conferir com o gerente o motivo específico.</li>"
-            )
+    if not fechamento_nao_enviado:
+        for nome, info in deltas.items():
+            if nome in categorias_explicadas:
+                continue
+            if nome == "PIX" and pix_ifood_total > 0:
+                continue  # ja explicado na nota do PIX-iFood acima
+            if abs(info["delta"]) > 5:
+                sinal = "a mais" if info["delta"] > 0 else "a menos"
+                notas_pendentes.append(
+                    f"<li><b>{nome}</b> teve uma diferença de R$ {abs(info['delta']):.2f} ({sinal}) que não "
+                    f"foi automaticamente explicada — vale conferir com o gerente o motivo específico.</li>"
+                )
 
     todas_notas = notas_trocas + notas_pendentes
     bloco_notas = ""
@@ -823,6 +846,7 @@ def montar_secao_turno(turno_label, planilha, saipos_categorias, pagseguro_por_c
 
     tabela = f"""
     <h3 style="margin:18px 0 6px;color:#333;">{"Turno " + turno_label if turno_label else "Fechamento do dia"}</h3>
+    {aviso_nao_enviado}
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
       <tr style="background:#F0F0F0;">
         <th align="left" style="padding:8px 10px;border:1px solid #ddd;color:#555;">Fonte</th>
@@ -933,21 +957,13 @@ def calcular_farol_geral(farois):
     return "cinza"
 
 
-def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None, modo_teste=False, anexos=None):
+def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao_pix=None, anexos=None):
     ano_f, mes_f, dia_f = data_str.split("-")
     data_formatada = f"{dia_f}/{mes_f}/{ano_f}"
 
     farol_geral = calcular_farol_geral(farois_gerais)
     emoji_geral = FAROL_EMOJI.get(farol_geral, "⚪")
     texto_geral = FAROL_TEXTO.get(farol_geral, "SEM DADOS")
-
-    faixa_teste = ""
-    if modo_teste:
-        faixa_teste = """
-        <div style="background:#333;color:#fff;text-align:center;padding:8px;font-size:12px;font-weight:700;letter-spacing:1px;">
-          ⚠️ E-MAIL DE TESTE — NÃO É O FECHAMENTO OFICIAL DO DIA
-        </div>
-        """
 
     secao_excecao = ""
     if excecao_pix:
@@ -992,7 +1008,6 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f2f2;padding:24px 0;">
     <tr><td align="center">
     <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08);">
-      {faixa_teste}
       <tr>
         <td style="background:#6B0A0A;padding:16px 24px;">
           <table role="presentation" width="100%"><tr>
@@ -1029,7 +1044,7 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "message": {
-            "subject": f"{'[TESTE] ' if modo_teste else ''}{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
+            "subject": f"{emoji_geral} Fechamento Caixa {CIDADE} - {data_formatada}",
             "body": {"contentType": "HTML", "content": corpo_html},
             "toRecipients": [{"emailAddress": {"address": EMAIL_DESTINATARIO}}],
             "attachments": anexos or [],
@@ -1044,7 +1059,6 @@ def enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, exceca
 # ─────────────────────────────────────────────
 def main():
     data_override = os.environ.get("DATA_ALVO", "").strip()
-    modo_teste_flag = os.environ.get("MODO_TESTE", "true").strip().lower() == "true"
     if data_override:
         ontem = datetime.strptime(data_override, "%Y-%m-%d").date()
         print(f"Usando data manual (DATA_ALVO): {ontem}")
@@ -1075,7 +1089,7 @@ def main():
           As fotos anexadas abaixo são do fechamento enviado pela loja, para conferência manual.
         </p>
         """]
-        enviar_email_conciliacao(token, data_str, secoes_html, ["cinza"], None, modo_teste=modo_teste_flag, anexos=anexos_fotos)
+        enviar_email_conciliacao(token, data_str, secoes_html, ["cinza"], None, anexos=anexos_fotos)
         return
 
     try:
@@ -1244,7 +1258,7 @@ def main():
         print(f"Falha ao buscar fotos do dia: {e}")
         anexos_fotos = []
 
-    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, modo_teste=modo_teste_flag, anexos=anexos_fotos)
+    enviar_email_conciliacao(token, data_str, secoes_html, farois_gerais, excecao, anexos=anexos_fotos)
     print("E-mail unico enviado com sucesso.")
 
 
