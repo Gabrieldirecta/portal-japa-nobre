@@ -3,13 +3,21 @@ name: Conciliação Diária — PagSeguro x Fechamento de Caixa
 on:
   schedule:
     # 8h da manhã em Brasília (UTC-3) = 11h em UTC
-    - cron: "0 11 * * *"
+    - cron: "55 11 * * *"
   workflow_dispatch:  # permite rodar manualmente pelo botão "Run workflow" no GitHub
     inputs:
       data_alvo:
         description: "Data para conciliar (AAAA-MM-DD). Deixe em branco para usar 'ontem' automaticamente."
         required: false
         default: ""
+      modo_teste:
+        description: "Marcar como TESTE no e-mail? Escolha 'false' para enviar como e-mail oficial (ex: reenvio de correção)."
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 jobs:
   conciliacao:
@@ -45,6 +53,8 @@ jobs:
           SAIPOS_TOKEN: ${{ secrets.SAIPOS_TOKEN }}
           EMAIL_REMETENTE_MAILBOX: gabriel@hakunabatata.com.br
           EMAIL_DESTINATARIO: gestaojapanobre@gmail.com
+          DATA_ALVO: ${{ github.event.inputs.data_alvo }}
+          MODO_TESTE: ${{ github.event.inputs.modo_teste }}
         run: python job_conferencia_8h.py
 
       - name: Remover certificados temporários
